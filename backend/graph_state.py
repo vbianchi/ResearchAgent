@@ -23,8 +23,8 @@ class ResearchAgentState(TypedDict):
 
     # --- Fields for Iterating and Controlling Plan Steps ---
     current_step_index: Optional[int] 
-    previous_step_executor_output: Optional[str] # Output from the *previous executed* step (used by Controller)
-    retry_count_for_current_step: Optional[int] # To manage retries for the current step
+    previous_step_executor_output: Optional[str] 
+    retry_count_for_current_step: Optional[int] 
 
     # --- Fields for ControllerNode output (for the current step) ---
     controller_tool_name: Optional[str]
@@ -41,16 +41,17 @@ class ResearchAgentState(TypedDict):
     step_evaluation_achieved_goal: Optional[bool]
     step_evaluation_assessment: Optional[str]
     step_evaluation_is_recoverable: Optional[bool]
-    # Suggestions for retry if is_recoverable is True:
     step_evaluation_suggested_tool: Optional[str] 
-    step_evaluation_suggested_input_instructions: Optional[str] # Instructions for Controller
+    step_evaluation_suggested_input_instructions: Optional[str] 
     step_evaluation_confidence_in_correction: Optional[float]
-    step_evaluation_error: Optional[str] # For errors occurring within the StepEvaluatorNode itself
+    step_evaluation_error: Optional[str] 
     
-    # --- Fields for OverallEvaluatorNode (example, to be added later) ---
-    # overall_evaluation_success: Optional[bool]
-    # overall_evaluation_assessment: Optional[str]
-    # overall_evaluation_final_answer: Optional[str]
+    # --- Fields for OverallEvaluatorNode output ---
+    overall_evaluation_success: Optional[bool]
+    overall_evaluation_assessment: Optional[str] # User-facing summary of plan outcome
+    overall_evaluation_final_answer_content: Optional[str] # The actual content to show user if successful
+    overall_evaluation_suggestions_for_replan: Optional[List[str]] # If plan failed
+    overall_evaluation_error: Optional[str] # For errors within the OverallEvaluatorNode itself
 
     # General operational fields
     error_message: Optional[str] 
