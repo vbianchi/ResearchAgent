@@ -16,7 +16,10 @@ langchain-community>=0.0.20
 langchainhub>=0.1.15
 langchain-experimental>=0.0.50 # For Python REPL Tool
 langchain-ollama>=0.1.0
-langchain-tavily>=0.1.0 # MODIFIED: Added Tavily Search
+langchain-tavily>=0.1.0
+
+# --- LangGraph ---
+langgraph>=0.0.30 # Or a more recent version if known, starting with a reasonable one
 
 # --- Tool Dependencies ---
 duckduckgo-search>=5.0

@@ -1,7 +1,7 @@
 # backend/llm_setup.py
 import logging
-from typing import Optional, List 
-from langchain_core.callbacks.base import BaseCallbackHandler # For type hinting
+from typing import Optional, List, Union # MODIFIED: Added Union
+from langchain_core.callbacks.base import BaseCallbackHandler, BaseCallbackManager # MODIFIED: Added BaseCallbackManager
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_ollama import OllamaLLM 
 from langchain_core.language_models.base import BaseLanguageModel
@@ -15,23 +15,21 @@ def get_llm(
     model_name: str, 
     is_fallback_attempt: bool = False, 
     requested_for_role: Optional[str] = None,
-    callbacks: Optional[List[BaseCallbackHandler]] = None # MODIFIED: Added callbacks parameter
+    # MODIFIED: Changed type hint for callbacks
+    callbacks: Union[List[BaseCallbackHandler], BaseCallbackManager, None] = None 
 ) -> BaseLanguageModel:
     """
     Initializes and returns the appropriate LangChain LLM wrapper.
-    If the initial attempt fails and it's not already a fallback attempt,
-    it will try to initialize using the system's default LLM settings.
-    Now accepts an optional list of callbacks to pass to the LLM constructor.
+    Accepts a list of BaseCallbackHandler instances or a BaseCallbackManager instance.
     """
     role_context = f" for role '{requested_for_role}'" if requested_for_role else ""
     attempt_type = " (Fallback to system default)" if is_fallback_attempt else ""
     logger.info(f"Attempting to initialize LLM{role_context}: Provider='{provider}', Model='{model_name}'{attempt_type}")
+    
     if callbacks:
-        # Use CRITICAL for this debug log to ensure it's visible even if callbacks.py logger is INFO
-        logger.critical(f"CRITICAL_DEBUG: get_llm (Role: {requested_for_role}) received callbacks: {[type(cb).__name__ for cb in callbacks]}")
+        logger.debug(f"get_llm (Role: {requested_for_role}) received callbacks of type: {type(callbacks)}")
     else:
         logger.debug(f"get_llm (Role: {requested_for_role}) received no callbacks.")
-
 
     try:
         if provider == "gemini":
@@ -42,17 +40,20 @@ def get_llm(
                 model=model_name,
                 google_api_key=settings.google_api_key,
                 temperature=settings.gemini_temperature,
-                callbacks=callbacks # MODIFIED: Pass callbacks to constructor
+                callbacks=callbacks # MODIFIED: Pass callbacks directly
             )
             logger.info(f"Successfully initialized ChatGoogleGenerativeAI{role_context}: Model='{model_name}', Temp='{settings.gemini_temperature}'")
             return llm
 
         elif provider == "ollama":
+            # Note: OllamaLLM from langchain_ollama might have a slightly different signature or expectation
+            # for callbacks compared to ChatGoogleGenerativeAI. Let's assume it also accepts Callbacks type.
+            # If it specifically needs a list, this might need further adjustment for Ollama.
             llm = OllamaLLM( 
                 base_url=settings.ollama_base_url,
                 model=model_name,
                 temperature=settings.ollama_temperature,
-                callbacks=callbacks # MODIFIED: Pass callbacks to constructor
+                callbacks=callbacks # MODIFIED: Pass callbacks directly
             )
             logger.info(f"Successfully initialized OllamaLLM{role_context}: Model='{model_name}', URL='{settings.ollama_base_url}', Temp='{settings.ollama_temperature}'")
             return llm
@@ -62,12 +63,13 @@ def get_llm(
             raise ValueError(f"Unsupported LLM provider requested{role_context}: {provider}")
 
     except Exception as e:
-        logger.warning(f"Failed to initialize LLM '{provider}::{model_name}'{role_context}: {e}")
+        logger.warning(f"Failed to initialize LLM '{provider}::{model_name}'{role_context}: {e}", exc_info=True) # Added exc_info
         if not is_fallback_attempt:
             fallback_role_context = f" (originally for role '{requested_for_role}')" if requested_for_role else ""
             logger.warning(f"Attempting fallback to system default LLM: {settings.default_provider}::{settings.default_model_name}{fallback_role_context}")
             try:
-                # Fallback should not inherit component-specific callbacks
+                # Fallback should not inherit component-specific callbacks if the primary failed due to them.
+                # Or, if the issue is systemic, it might also fail. For now, pass None.
                 return get_llm(settings, settings.default_provider, settings.default_model_name, is_fallback_attempt=True, requested_for_role=f"System Default Fallback (was for {requested_for_role or 'Unknown Role'})", callbacks=None)
             except Exception as fallback_e:
                 logger.error(f"Fallback LLM initialization failed{fallback_role_context}: {fallback_e}", exc_info=True)
