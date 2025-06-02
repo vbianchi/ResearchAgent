@@ -1,36 +1,33 @@
 # backend/evaluator.py
 import logging
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Union # Added Union
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
-# <<< MODIFIED IMPORT: Using Pydantic v2 directly --- >>>
-from pydantic import BaseModel, Field, conlist
-# <<< --- END MODIFIED IMPORT --- >>>
-from langchain_core.tools import BaseTool # Not used directly, but good for context
+from pydantic import BaseModel, Field, ValidationError # Pydantic v2
+from langchain_core.tools import BaseTool 
 from langchain_core.runnables import RunnableConfig
-from langchain_core.callbacks.base import BaseCallbackHandler
-
+from langchain_core.callbacks.base import BaseCallbackHandler, BaseCallbackManager # Added BaseCallbackManager
 
 from backend.config import settings
 from backend.llm_setup import get_llm
-from backend.planner import PlanStep # Assuming PlanStep is also migrated or compatible
+# PlanStep might not be strictly needed if current_plan_step is passed as dict
+from backend.planner import PlanStep 
 from backend.callbacks import LOG_SOURCE_EVALUATOR_STEP, LOG_SOURCE_EVALUATOR_OVERALL
-
 
 logger = logging.getLogger(__name__)
 
-class StepCorrectionOutcome(BaseModel): # <<< Now inherits from Pydantic v2 BaseModel
+class StepCorrectionOutcome(BaseModel): 
     step_achieved_goal: bool = Field(description="Boolean indicating if the step's primary goal was achieved based on the executor's output.")
     assessment_of_step: str = Field(description="Detailed assessment of the step's outcome, explaining why it succeeded or failed. If failed, explain the discrepancy between expected and actual outcome.")
-    is_recoverable_via_retry: Optional[bool] = Field(description="If step_achieved_goal is false, boolean indicating if the step might be recoverable with a retry using a modified approach. Null if goal achieved.", default=None)
-    suggested_new_tool_for_retry: Optional[str] = Field(description="If recoverable, the suggested tool name for the retry attempt (can be 'None'). Null if not recoverable or goal achieved.", default=None)
+    is_recoverable_via_retry: Optional[bool] = Field(default=None, description="If step_achieved_goal is false, boolean indicating if the step might be recoverable with a retry using a modified approach. Null if goal achieved.")
+    suggested_new_tool_for_retry: Optional[str] = Field(default=None, description="If recoverable, the suggested tool name for the retry attempt (can be 'None'). Null if not recoverable or goal achieved.")
     suggested_new_input_instructions_for_retry: Optional[str] = Field(
+        default=None,
         description="If recoverable, new or revised input instructions for the Controller to formulate the tool_input for the retry. Null if not recoverable or goal achieved. **Crucially, if the failure was because the Executor described its action or output instead of providing the direct content, these instructions MUST explicitly guide the Controller to instruct the Executor to output ONLY the raw content itself in its 'Final Answer'.**"
     )
-    confidence_in_correction: Optional[float] = Field(description="If recoverable, confidence (0.0-1.0) in the suggested correction. Null if not recoverable or goal achieved.", default=None)
-    # No model_config needed here as Pydantic v2 defaults are fine for this model.
+    confidence_in_correction: Optional[float] = Field(default=None, description="If recoverable, confidence (0.0-1.0) in the suggested correction. Null if not recoverable or goal achieved.")
 
 STEP_EVALUATOR_SYSTEM_PROMPT_TEMPLATE = """You are an expert Step Evaluator for a research agent. Your task is to meticulously assess if a single executed plan step achieved its intended goal, based on its output and the original expectations.
 **Context for Evaluation:**
@@ -69,7 +66,7 @@ Output ONLY a JSON object adhering to this schema:
 Do not include any preamble or explanation outside the JSON object.
 """
 
-class EvaluationResult(BaseModel): # <<< Now inherits from Pydantic v2 BaseModel
+class EvaluationResult(BaseModel): 
     overall_success: bool = Field(description="Boolean indicating if the overall user query was successfully addressed by the executed plan.")
     confidence_score: float = Field(description="A score from 0.0 to 1.0 indicating confidence in the success/failure assessment.")
     assessment: str = Field(description="A concise, user-facing explanation of why the plan succeeded or failed overall, OR a brief confirmation if successful and final_answer_content is provided.")
@@ -77,8 +74,7 @@ class EvaluationResult(BaseModel): # <<< Now inherits from Pydantic v2 BaseModel
         default=None,
         description="If overall_success is True and the plan generated a direct user-facing answer (typically from the last step), this field MUST contain that exact, complete answer. Otherwise, it should be null or omitted."
     )
-    suggestions_for_replan: Optional[List[str]] = Field(description="If the plan failed, a list of high-level suggestions for how a new plan might better achieve the goal. Null if successful.", default=None)
-    # No model_config needed here.
+    suggestions_for_replan: Optional[List[str]] = Field(default=None, description="If the plan failed, a list of high-level suggestions for how a new plan might better achieve the goal. Null if successful.")
 
 OVERALL_EVALUATOR_SYSTEM_PROMPT_TEMPLATE = """You are an expert Overall Plan Evaluator for a research agent.
 Your task is to assess if the executed multi-step plan successfully achieved the user's original query, based on a summary of the plan's execution and the final answer produced by the last step of the plan.
@@ -116,53 +112,52 @@ Do not include any preamble or explanation outside of the JSON object.
 
 async def evaluate_step_outcome_and_suggest_correction(
     original_user_query: str,
-    plan_step_being_evaluated: PlanStep, # Assuming PlanStep is Pydantic v2
+    current_plan_step: Dict[str, Any], # Expecting a dict representation of PlanStep
     controller_tool_used: Optional[str],
     controller_tool_input: Optional[str],
     step_executor_output: str,
-    available_tools: List[BaseTool], # BaseTool itself is Pydantic v1 based in LangChain, but we only use name/desc
-    session_data_entry: Dict[str, Any],
-    callback_handler: Optional[BaseCallbackHandler] = None
-) -> Optional[StepCorrectionOutcome]:
-    logger.info(f"Evaluator (Step): Evaluating step '{plan_step_being_evaluated.step_id}: {plan_step_being_evaluated.description[:50]}...'")
+    available_tools: List[BaseTool], 
+    evaluator_llm_id_override: Optional[str] = None, # For Evaluator's own LLM
+    callback_handler: Union[List[BaseCallbackHandler], BaseCallbackManager, None] = None
+) -> Dict[str, Any]: # Returns a dict to update ResearchAgentState's step_evaluation_* fields
+    """
+    Evaluates a single plan step's outcome and suggests corrections if needed.
+    """
+    step_desc_for_log = current_plan_step.get('description', 'N/A')[:50]
+    logger.info(f"Evaluator (Step): Evaluating step '{step_desc_for_log}...'")
 
-    callbacks_for_invoke: List[BaseCallbackHandler] = []
-    if callback_handler:
-        callbacks_for_invoke.append(callback_handler)
-        logger.critical(f"CRITICAL_DEBUG: EVALUATOR_STEP - evaluate_step_outcome_and_suggest_correction received callback_handler: {type(callback_handler).__name__}")
-    else:
-        logger.critical("CRITICAL_DEBUG: EVALUATOR_STEP - evaluate_step_outcome_and_suggest_correction received NO callback_handler.")
+    llm_provider_to_use = settings.evaluator_provider
+    llm_model_to_use = settings.evaluator_model_name
 
-
-    evaluator_llm_id_override = session_data_entry.get("session_evaluator_llm_id")
-    evaluator_provider = settings.evaluator_provider
-    evaluator_model_name = settings.evaluator_model_name
     if evaluator_llm_id_override:
         try:
             provider_override, model_override = evaluator_llm_id_override.split("::", 1)
             if provider_override in ["gemini", "ollama"] and model_override:
-                evaluator_provider, evaluator_model_name = provider_override, model_override
-                logger.info(f"Evaluator (Step): Using session override LLM: {evaluator_llm_id_override}")
+                llm_provider_to_use, llm_model_to_use = provider_override, model_override
+                logger.info(f"Evaluator (Step): Using session override LLM for Step Evaluator: {evaluator_llm_id_override}")
             else:
-                logger.warning(f"Evaluator (Step): Invalid session LLM ID structure '{evaluator_llm_id_override}'. Using system default.")
+                logger.warning(f"Evaluator (Step): Invalid structure or provider in LLM override '{evaluator_llm_id_override}'. Using system default.")
         except ValueError:
-            logger.warning(f"Evaluator (Step): Invalid session LLM ID format '{evaluator_llm_id_override}'. Using system default.")
-
+            logger.warning(f"Evaluator (Step): Invalid LLM override format '{evaluator_llm_id_override}'. Using system default.")
+    
     try:
-        logger.critical(f"CRITICAL_DEBUG: EVALUATOR_STEP - About to call get_llm. Callbacks_for_invoke: {[type(cb).__name__ for cb in callbacks_for_invoke] if callbacks_for_invoke else 'None'}")
         evaluator_llm: BaseChatModel = get_llm(
             settings,
-            provider=evaluator_provider,
-            model_name=evaluator_model_name,
+            provider=llm_provider_to_use,
+            model_name=llm_model_to_use,
             requested_for_role=LOG_SOURCE_EVALUATOR_STEP,
-            callbacks=callbacks_for_invoke
+            callbacks=callback_handler
         )
-        logger.info(f"Evaluator (Step): Using LLM {evaluator_provider}::{evaluator_model_name}")
+        logger.info(f"Evaluator (Step): Using LLM {llm_provider_to_use}::{llm_model_to_use}")
     except Exception as e:
         logger.error(f"Evaluator (Step): Failed to initialize LLM: {e}", exc_info=True)
-        return None
+        return {
+            "step_evaluation_achieved_goal": False,
+            "step_evaluation_assessment": f"LLM initialization failed for Step Evaluator: {e}",
+            "step_evaluation_is_recoverable": False,
+            "step_evaluation_error": f"LLM initialization failed: {e}"
+        }
 
-    # JsonOutputParser with pydantic_object is compatible with Pydantic v2 models
     parser = JsonOutputParser(pydantic_object=StepCorrectionOutcome)
     format_instructions = parser.get_format_instructions()
     tools_summary_for_eval = "\n".join([f"- {tool.name}: {tool.description.split('.')[0]}" for tool in available_tools])
@@ -171,187 +166,93 @@ async def evaluate_step_outcome_and_suggest_correction(
         ("system", STEP_EVALUATOR_SYSTEM_PROMPT_TEMPLATE),
         ("human", "Evaluate the step execution based on the provided context and output your assessment in the specified JSON format.")
     ])
+    
     chain = prompt | evaluator_llm | parser
+    
+    invoke_payload = {
+        "original_user_query": original_user_query,
+        "current_step_description": current_plan_step.get('description', 'N/A'),
+        "current_step_expected_outcome": current_plan_step.get('expected_outcome', 'N/A'),
+        "controller_tool_used": controller_tool_used or "None",
+        "controller_tool_input": controller_tool_input or "None",
+        "step_executor_output": step_executor_output,
+        "available_tools_summary": tools_summary_for_eval,
+        "format_instructions": format_instructions
+    }
+    run_config = RunnableConfig(
+        callbacks=callback_handler if isinstance(callback_handler, BaseCallbackManager) else ([callback_handler] if callback_handler else None),
+        metadata={"component_name": LOG_SOURCE_EVALUATOR_STEP}
+    )
+    error_message_for_state = None
 
     try:
-        evaluator_input_payload = {
-            "original_user_query": original_user_query,
-            "current_step_description": plan_step_being_evaluated.description,
-            "current_step_expected_outcome": plan_step_being_evaluated.expected_outcome,
-            "controller_tool_used": controller_tool_used or "None",
-            "controller_tool_input": controller_tool_input or "None",
-            "step_executor_output": step_executor_output,
-            "available_tools_summary": tools_summary_for_eval,
-            "format_instructions": format_instructions
+        eval_outcome_model: StepCorrectionOutcome = await chain.ainvoke(invoke_payload, config=run_config)
+        
+        if isinstance(eval_outcome_model, dict): # Handle if parser returns dict
+            logger.debug("Step Evaluator: LLM output parser returned a dict, validating with Pydantic model StepCorrectionOutcome.")
+            try:
+                eval_outcome_model = StepCorrectionOutcome(**eval_outcome_model)
+            except ValidationError as ve_eval:
+                logger.error(f"Step Evaluator: Pydantic validation failed for StepCorrectionOutcome from LLM dict: {ve_eval}. Raw dict: {eval_outcome_model}", exc_info=True)
+                raise
+
+        logger.info(f"Evaluator (Step): Achieved Goal: {eval_outcome_model.step_achieved_goal}, Recoverable: {eval_outcome_model.is_recoverable_via_retry}, Assessment: {eval_outcome_model.assessment_of_step}")
+        # Map StepCorrectionOutcome fields to state fields
+        return {
+            "step_evaluation_achieved_goal": eval_outcome_model.step_achieved_goal,
+            "step_evaluation_assessment": eval_outcome_model.assessment_of_step,
+            "step_evaluation_is_recoverable": eval_outcome_model.is_recoverable_via_retry,
+            "step_evaluation_suggested_tool": eval_outcome_model.suggested_new_tool_for_retry,
+            "step_evaluation_suggested_input_instructions": eval_outcome_model.suggested_new_input_instructions_for_retry,
+            "step_evaluation_confidence_in_correction": eval_outcome_model.confidence_in_correction,
+            "step_evaluation_error": None
         }
-        logger.debug(f"Evaluator (Step {plan_step_being_evaluated.step_id}) INPUT - Expected Outcome: '{plan_step_being_evaluated.expected_outcome}'")
-        logger.debug(f"Evaluator (Step {plan_step_being_evaluated.step_id}) INPUT - Actual Executor Output (first 300 chars): '{step_executor_output[:300]}...'")
-
-        eval_result_data = await chain.ainvoke( # Renamed from eval_result_dict to avoid confusion
-            evaluator_input_payload,
-            config=RunnableConfig(
-                callbacks=callbacks_for_invoke,
-                metadata={"component_name": LOG_SOURCE_EVALUATOR_STEP}
-            )
-        )
-
-        # JsonOutputParser with pydantic_object should return an instance of StepCorrectionOutcome
-        if isinstance(eval_result_data, StepCorrectionOutcome):
-            eval_outcome = eval_result_data
-        elif isinstance(eval_result_data, dict): # Fallback if it returns a dict
-             eval_outcome = StepCorrectionOutcome(**eval_result_data)
-        else:
-            logger.error(f"Step Evaluator LLM call returned an unexpected type: {type(eval_result_data)}. Content: {eval_result_data}")
-            raw_output_chain = prompt | evaluator_llm | StrOutputParser()
-            raw_output = await raw_output_chain.ainvoke(
-                evaluator_input_payload,
-                config=RunnableConfig(
-                    callbacks=callbacks_for_invoke,
-                    metadata={"component_name": LOG_SOURCE_EVALUATOR_STEP + "_ERROR_HANDLER"}
-                )
-            )
-            logger.error(f"Step Evaluator Raw LLM output on Pydantic error: {raw_output}")
-            return None
-
-        logger.info(f"Evaluator (Step {plan_step_being_evaluated.step_id}): Achieved Goal: {eval_outcome.step_achieved_goal}, Recoverable: {eval_outcome.is_recoverable_via_retry}, Assessment: {eval_outcome.assessment_of_step}")
-        return eval_outcome
+    except ValidationError as ve:
+         logger.error(f"Step Evaluator: Pydantic validation error for StepCorrectionOutcome: {ve}", exc_info=True)
+         error_message_for_state = f"Step Evaluator output validation failed: {ve}"
     except Exception as e:
-        logger.error(f"Evaluator (Step): Error during step evaluation for step {plan_step_being_evaluated.step_id}: {e}", exc_info=True)
-        try:
-            input_payload_for_error = {
-                "original_user_query": original_user_query,
-                "current_step_description": plan_step_being_evaluated.description,
-                "current_step_expected_outcome": plan_step_being_evaluated.expected_outcome,
-                "controller_tool_used": controller_tool_used or "None",
-                "controller_tool_input": controller_tool_input or "None",
-                "step_executor_output": step_executor_output,
-                "available_tools_summary": tools_summary_for_eval,
-                "format_instructions": format_instructions
-            }
-            raw_output_chain = prompt | evaluator_llm | StrOutputParser()
-            raw_output = await raw_output_chain.ainvoke(
-                input_payload_for_error,
-                config=RunnableConfig(
-                    callbacks=callbacks_for_invoke,
-                    metadata={"component_name": LOG_SOURCE_EVALUATOR_STEP + "_ERROR_HANDLER"}
-                )
-            )
-            logger.error(f"Step Evaluator Raw LLM output on general error: {raw_output}")
-        except Exception as raw_e:
-            logger.error(f"Step Evaluator: Failed to get raw LLM output during general error handling: {raw_e}")
-        return None
+        logger.error(f"Evaluator (Step): Error during step evaluation for step '{step_desc_for_log}': {e}", exc_info=True)
+        error_message_for_state = f"Unexpected error in Step Evaluator: {type(e).__name__} - {str(e)}"
+
+    # Attempt to get raw output on error
+    try:
+        raw_output_chain = prompt | evaluator_llm | StrOutputParser()
+        raw_output = await raw_output_chain.ainvoke(invoke_payload, config=run_config) # Use same config
+        logger.error(f"Step Evaluator: Raw LLM output on error: {raw_output}")
+        if error_message_for_state:
+             error_message_for_state += f". Raw LLM output: {raw_output[:200]}..."
+        else:
+             error_message_for_state = f"Step Evaluator failed. Raw LLM output: {raw_output[:200]}..."
+    except Exception as raw_e:
+        logger.error(f"Step Evaluator: Failed to get raw LLM output on error: {raw_e}")
+        if error_message_for_state:
+            error_message_for_state += ". Failed to retrieve raw LLM output."
+        else:
+            error_message_for_state = "Step Evaluator failed and could not retrieve raw LLM output."
+            
+    return {
+        "step_evaluation_achieved_goal": False, # Default to false on error
+        "step_evaluation_assessment": error_message_for_state or "Step evaluation failed due to an internal error.",
+        "step_evaluation_is_recoverable": False, # Default to not recoverable on error
+        "step_evaluation_error": error_message_for_state or "Step evaluation failed."
+    }
 
 
-async def evaluate_plan_outcome(
+async def evaluate_plan_outcome( # This function remains for future use with OverallEvaluatorNode
     original_user_query: str,
     executed_plan_summary: str,
     final_agent_answer: str,
-    session_data_entry: Dict[str, Any],
-    callback_handler: Optional[BaseCallbackHandler] = None
-) -> Optional[EvaluationResult]:
+    evaluator_llm_id_override: Optional[str] = None,
+    callback_handler: Union[List[BaseCallbackHandler], BaseCallbackManager, None] = None
+) -> Optional[EvaluationResult]: # Returns the Pydantic model or None on error
+    # ... (Implementation of evaluate_plan_outcome - can be adapted similarly later) ...
     logger.info(f"Evaluator (Overall Plan): Evaluating outcome for query: {original_user_query[:100]}...")
-    logger.debug(f"Evaluator (Overall Plan): Received final_agent_answer (last step output) for evaluation (first 300 chars): {final_agent_answer[:300]}...")
+    # For now, this function is not the primary focus of refactoring for the step loop.
+    # It will be adapted when we build the OverallEvaluatorNode.
+    return None
 
 
-    callbacks_for_invoke: List[BaseCallbackHandler] = []
-    if callback_handler:
-        callbacks_for_invoke.append(callback_handler)
-        logger.critical(f"CRITICAL_DEBUG: EVALUATOR_OVERALL - evaluate_plan_outcome received callback_handler: {type(callback_handler).__name__}")
-    else:
-        logger.critical("CRITICAL_DEBUG: EVALUATOR_OVERALL - evaluate_plan_outcome received NO callback_handler.")
-
-    evaluator_llm_id_override = session_data_entry.get("session_evaluator_llm_id")
-    evaluator_provider = settings.evaluator_provider
-    evaluator_model_name = settings.evaluator_model_name
-    if evaluator_llm_id_override:
-        try:
-            provider_override, model_override = evaluator_llm_id_override.split("::", 1)
-            if provider_override in ["gemini", "ollama"] and model_override:
-                evaluator_provider, evaluator_model_name = provider_override, model_override
-                logger.info(f"Evaluator (Overall Plan): Using session override LLM: {evaluator_llm_id_override}")
-            else:
-                logger.warning(f"Evaluator (Overall Plan): Invalid session LLM ID structure '{evaluator_llm_id_override}'. Using system default.")
-        except ValueError:
-            logger.warning(f"Evaluator (Overall Plan): Invalid session LLM ID format '{evaluator_llm_id_override}'. Using system default.")
-
-    try:
-        logger.critical(f"CRITICAL_DEBUG: EVALUATOR_OVERALL - About to call get_llm. Callbacks_for_invoke: {[type(cb).__name__ for cb in callbacks_for_invoke] if callbacks_for_invoke else 'None'}")
-        evaluator_llm: BaseChatModel = get_llm(
-            settings,
-            provider=evaluator_provider,
-            model_name=evaluator_model_name,
-            requested_for_role=LOG_SOURCE_EVALUATOR_OVERALL,
-            callbacks=callbacks_for_invoke
-        )
-        logger.info(f"Evaluator (Overall Plan): Using LLM {evaluator_provider}::{evaluator_model_name}")
-    except Exception as e:
-        logger.error(f"Evaluator (Overall Plan): Failed to initialize LLM: {e}", exc_info=True)
-        return None
-
-    # JsonOutputParser with pydantic_object is compatible with Pydantic v2 models
-    parser = JsonOutputParser(pydantic_object=EvaluationResult)
-    format_instructions = parser.get_format_instructions()
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", OVERALL_EVALUATOR_SYSTEM_PROMPT_TEMPLATE),
-        ("human", "Evaluate the overall plan execution based on the provided context and output your assessment in the specified JSON format.")
-    ])
-    chain = prompt | evaluator_llm | parser
-
-    try:
-        payload_for_overall_eval = {
-            "original_user_query": original_user_query,
-            "executed_plan_summary": executed_plan_summary,
-            "final_agent_answer": final_agent_answer,
-            "format_instructions": format_instructions
-        }
-        eval_result_data = await chain.ainvoke( # Renamed from eval_result_dict
-            payload_for_overall_eval,
-            config=RunnableConfig(
-                callbacks=callbacks_for_invoke,
-                metadata={"component_name": LOG_SOURCE_EVALUATOR_OVERALL}
-            )
-        )
-
-        # JsonOutputParser with pydantic_object should return an instance of EvaluationResult
-        if isinstance(eval_result_data, EvaluationResult):
-            eval_result = eval_result_data
-        elif isinstance(eval_result_data, dict): # Fallback if it returns a dict
-            eval_result = EvaluationResult(**eval_result_data)
-        else:
-            logger.error(f"Overall Plan Evaluator LLM call returned an unexpected type: {type(eval_result_data)}. Content: {eval_result_data}")
-            raw_output_chain = prompt | evaluator_llm | StrOutputParser()
-            raw_output = await raw_output_chain.ainvoke(
-                payload_for_overall_eval,
-                config=RunnableConfig(
-                    callbacks=callbacks_for_invoke,
-                    metadata={"component_name": LOG_SOURCE_EVALUATOR_OVERALL + "_ERROR_HANDLER"}
-                )
-            )
-            logger.error(f"Overall Plan Evaluator Raw LLM output on Pydantic error: {raw_output}")
-            return None
-
-        logger.info(f"Evaluator (Overall Plan): Evaluation complete. Success: {eval_result.overall_success}, Confidence: {eval_result.confidence_score:.2f}, Assessment: '{eval_result.assessment}', Final Answer Content provided: {bool(eval_result.final_answer_content)}")
-        return eval_result
-    except Exception as e:
-        logger.error(f"Evaluator (Overall Plan): Error during overall plan evaluation: {e}", exc_info=True)
-        try:
-            payload_for_overall_eval_error = {
-                 "original_user_query": original_user_query,
-                 "executed_plan_summary": executed_plan_summary,
-                 "final_agent_answer": final_agent_answer,
-                 "format_instructions": format_instructions
-            }
-            raw_output_chain = prompt | evaluator_llm | StrOutputParser()
-            raw_output = await raw_output_chain.ainvoke(
-                payload_for_overall_eval_error,
-                config=RunnableConfig(
-                    callbacks=callbacks_for_invoke,
-                    metadata={"component_name": LOG_SOURCE_EVALUATOR_OVERALL + "_ERROR_HANDLER"}
-                )
-            )
-            logger.error(f"Overall Plan Evaluator Raw LLM output on general error: {raw_output}")
-        except Exception as raw_e:
-            logger.error(f"Overall Plan Evaluator: Failed to get raw LLM output on general error: {raw_e}")
-        return None
-
+# if __name__ == '__main__':
+    # Standalone testing for evaluate_step_outcome_and_suggest_correction would be complex
+    # due to dependencies on PlanStep structure, available_tools, and LLM calls.
+    # It's better tested via the langgraph_agent.py test runner.

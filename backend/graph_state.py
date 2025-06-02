@@ -23,7 +23,8 @@ class ResearchAgentState(TypedDict):
 
     # --- Fields for Iterating and Controlling Plan Steps ---
     current_step_index: Optional[int] 
-    previous_step_executor_output: Optional[str] 
+    previous_step_executor_output: Optional[str] # Output from the *previous executed* step (used by Controller)
+    retry_count_for_current_step: Optional[int] # To manage retries for the current step
 
     # --- Fields for ControllerNode output (for the current step) ---
     controller_tool_name: Optional[str]
@@ -33,12 +34,23 @@ class ResearchAgentState(TypedDict):
     controller_error: Optional[str] 
 
     # --- Fields for ExecutorNode output (for the current step) ---
-    current_executor_output: Optional[str] # Output from the tool/LLM execution
-    executor_error_message: Optional[str] # Specific errors from the executor node/tool run
+    current_executor_output: Optional[str] 
+    executor_error_message: Optional[str] 
 
-    # --- Fields for EvaluatorNode (example, to be added later) ---
-    # step_evaluation_achieved_goal: Optional[bool]
-    # ... (other evaluation fields)
+    # --- Fields for StepEvaluatorNode output (for the current step) ---
+    step_evaluation_achieved_goal: Optional[bool]
+    step_evaluation_assessment: Optional[str]
+    step_evaluation_is_recoverable: Optional[bool]
+    # Suggestions for retry if is_recoverable is True:
+    step_evaluation_suggested_tool: Optional[str] 
+    step_evaluation_suggested_input_instructions: Optional[str] # Instructions for Controller
+    step_evaluation_confidence_in_correction: Optional[float]
+    step_evaluation_error: Optional[str] # For errors occurring within the StepEvaluatorNode itself
+    
+    # --- Fields for OverallEvaluatorNode (example, to be added later) ---
+    # overall_evaluation_success: Optional[bool]
+    # overall_evaluation_assessment: Optional[str]
+    # overall_evaluation_final_answer: Optional[str]
 
     # General operational fields
-    error_message: Optional[str] # For critical graph/node errors not specific to a component's logic
+    error_message: Optional[str] 
