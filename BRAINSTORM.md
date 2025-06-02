@@ -2,72 +2,70 @@
 
 This document tracks user feedback and brainstorming ideas for the ResearchAgent project, focusing on the transition to LangGraph and future capabilities.
 
-## Current Version & State (Targeting V1.0 Go-Live - Embarking on LangGraph Migration)
+**Current Version & State (Targeting V2.6.0 - LangGraph PCEE Loop Functional in Tests)**
 
-**Recent Key Advancements (Prior to LangGraph Decision):**
-* "Plug and Play" Tool System: Dynamic tool loading via `tool_config.json` achieved.
-* Pydantic v2 Migration: Largely completed for core data models and tool arguments.
-* UI/UX Enhancements: Significant improvements to chat, plan proposal, token tracking, file uploads.
+**Recent Key Advancements:**
+* **LangGraph Migration - Core PCEE Loop Achieved:** The primary Plan-Code-Execute-Evaluate (PCEE) workflow, including Intent Classification, Planning, Controller, Executor, Step Evaluator, iterative step processing, and Overall Evaluator, has been successfully implemented and tested as a stateful graph using LangGraph. [cite: 1] This provides explicit control over the agent's execution flow, improved state management, and a solid foundation for robust interruption/cancellation. [cite: 428, 461]
+* "Plug and Play" Tool System: Dynamic tool loading via `tool_config.json` remains functional and integrated. [cite: 431, 457]
+* Pydantic v2 Migration: Largely completed for core data models, LangGraph state, and tool arguments. [cite: 432, 458]
+* UI/UX Enhancements: Previous improvements to chat, plan proposal, token tracking, file uploads are in place. [cite: 433, 459]
 
-**Current Strategic Pivot:**
-* **Migrating to LangGraph:** The project is shifting its core agent architecture to LangGraph.
-* **Rationale:** To gain explicit control over the agent's execution flow, improve state management, enable more robust task interruption/cancellation, and lay a better foundation for future concurrent task processing and advanced agent capabilities like dynamic code execution.
+**Immediate Focus: Stabilizing LangGraph Agent & Full Application Integration**
 
-## Immediate Focus: LangGraph Migration & Core Functionality Refoundation
+1.  **Robust Retry Logic within LangGraph Loop:** [cite: 1]
+    * **Goal:** Enable the agent to intelligently retry failed plan steps.
+    * **Approach:** Enhance the `ControllerNode` to use feedback from the `StepEvaluatorNode` (e.g., `step_evaluation_suggested_tool`, `step_evaluation_suggested_input_instructions`) when a step is marked as recoverable. Manage `retry_count_for_current_step`.
 
-1.  **CRITICAL: LangGraph Migration - PCEE Workflow Implementation:**
-    * **Goal:** Re-implement the core Plan-Code-Execute-Evaluate (PCEE) loop as a stateful graph using LangGraph.
-    * **Details:** Define state schema; adapt components (Intent Classifier, Planner, Controller, Executor logic, Evaluators) as graph nodes; implement conditional edges.
-    * **Effort & Time Est.:** Significant, primary focus.
+2.  **Full Integration with Main Application (`server.py` & UI):** [cite: 1]
+    * **Goal:** Replace the old agent execution flow with the new LangGraph-based agent.
+    * **Approach:**
+        * Refactor `backend/message_processing/agent_flow_handlers.py` to invoke the compiled `research_agent_graph`.
+        * Ensure seamless communication via WebSockets, passing the `WebSocketCallbackHandler` to the graph for real-time UI updates (e.g., using `astream_events`).
+        * Handle `task_id` and session-specific LLM configurations through the graph's initial state or `RunnableConfig`.
 
-2.  **CRITICAL: Robust Task Interruption & Cancellation (within LangGraph):**
-    * **Goal:** Achieve reliable and prompt stopping/pausing of agent operations.
-    * **Approach:** Utilize LangGraph's `interrupt` features, `asyncio.Task.cancel()` on graph execution tasks, and ensure cooperative cancellation within custom nodes/tools.
+3.  **Implement `DIRECT_QA` Path in LangGraph:** [cite: 1]
+    * **Goal:** Efficiently handle simple questions that don't require full planning.
+    * **Approach:** Add a `DirectQANode` that is triggered if `classified_intent` is "DIRECT\_QA". This node will use an LLM to generate a direct answer, possibly using a simple search tool if needed. Its output can then flow to the `OverallEvaluatorNode` or directly to `END`.
 
-3.  **HIGH: Re-Verification of Core Features on LangGraph:**
-    * Tool Integration (Plug and Play), State Checkpointing, LLM Integration, UI Feedback (via `astream_events`), Artifact Viewer Refresh, Step Evaluation & Retry Logic, Token Usage Tracking.
+4.  **Refine Tool Loading and Availability in Graph Nodes:** [cite: 1]
+    * **Goal:** Optimize tool loading if current dynamic loading in each node proves inefficient.
+    * **Approach:** Investigate passing tool instances/summaries via graph state or loading them once per graph invocation if toolset is static for the run.
 
-4.  **HIGH: Comprehensive Testing of the New LangGraph Architecture.**
+5.  **Enhance Error Handling and Overall Agent Robustness:** [cite: 1]
+    * **Goal:** Make the agent more resilient to unexpected errors.
+    * **Approach:** Implement more granular error catching within nodes, define clear error states, and ensure the graph can gracefully go to the `OverallEvaluatorNode` or `END` upon critical failures, providing useful feedback to the user.
+
+6.  **CRITICAL Re-focus: Robust Task Interruption & Cancellation (within LangGraph):**
+    * **Goal:** Achieve reliable and prompt stopping/pausing of agent operations. [cite: 464]
+    * **Approach:** Now that the graph loop is functional, actively implement and test LangGraph's `interrupt` features, `asyncio.Task.cancel()` on graph execution tasks, and ensure cooperative cancellation within custom nodes/tools. [cite: 465] This is a primary objective of the LangGraph migration.
+
+7.  **Comprehensive Testing of the Integrated LangGraph Architecture.** [cite: 449, 467]
 
 ## Future Brainstorming / Enhanced Capabilities (Post-LangGraph Stability)
 
 **Leveraging LangGraph's Strengths:**
 
 1.  **Key Strategic Enhancement: `PythonSandboxTool` (CodeAct-Inspired Integration)**
-    * **Concept:** Introduce a powerful, specialized tool within the LangGraph framework that allows the agent to generate and execute Python code on-the-fly to handle complex or novel sub-tasks. This aligns with the user's enthusiasm for "Idea 1."
+    * **Concept:** Introduce a powerful, specialized tool within the LangGraph framework that allows the agent to generate and execute Python code on-the-fly to handle complex or novel sub-tasks. [cite: 449, 468, 577] This aligns with the user's enthusiasm for "Idea 1." [cite: 468]
     * **Mechanism:**
-        * **Invocation:** The LangGraph Controller node would decide to use the `PythonSandboxTool` when a task step is too complex for predefined tools.
-        * **Input:** A natural language description of the sub-task, relevant context (e.g., filenames in the workspace).
-        * **Internal LLM (Code Generation):** The tool itself would use a dedicated LLM (potentially a strong coding model) to translate the sub-task description into a Python script.
-        * **Sandboxed Execution:** The generated script runs in a secure, isolated environment (e.g., Docker container, heavily restricted Python interpreter). The sandbox would have:
-            * Controlled access to a curated set of safe Python libraries (e.g., pandas, numpy, matplotlib for data analysis and visualization).
-            * Restricted file system access, limited to the current task's workspace.
-            * Potentially, an API to call other existing "atomic" ResearchAgent tools in a controlled manner from within the generated script.
-        * **Output:** The tool returns the script's output (stdout, stderr), paths to any generated files (like plots or processed data files), or a structured success/error status.
-    * **Benefits:**
-        * **Massive Flexibility:** Agent can tackle a much wider range of problems by "writing its own solution" for parts of a task.
-        * **Reduced Need for Hyper-Specific Tools:** Instead of creating dozens of very granular tools, the agent can generate code for many specific data manipulations or analyses.
-        * **Leverages Specialized Models:** Allows using a powerful code generation LLM specifically for the coding sub-task, while other LLMs can handle planning, control, and evaluation.
-        * **Enhanced Problem Solving:** Enables the agent to perform more complex, multi-step computations or data transformations as a single "tool call" from the perspective of the main LangGraph.
-    * **Challenges & Considerations:**
-        * **Sandbox Security:** This is paramount. The sandbox must be extremely robust to prevent malicious or harmful code execution.
-        * **Reliability of Generated Code:** LLM-generated code can have bugs. The system might need mechanisms for the agent to test, debug, or refine the generated code (potentially using the iterative loop capabilities of LangGraph for this sub-process).
-        * **Prompt Engineering:** Crafting effective prompts for the internal code-generating LLM will be key.
-        * **Resource Management:** Code execution can be resource-intensive.
-        * **Observability:** Need good logging and insight into what code is generated and how it executes.
-
-2.  **True Asynchronous Background Task Processing (Enabled by LangGraph's State/Checkpointing).**
-3.  **More Complex Agentic Behaviors (Advanced Self-Correction, Multi-Actor Agents).**
-4.  **Persistent Agent State / Memory (across sessions for long-running tasks).**
-5.  **Sophisticated Human-in-the-Loop (HITL) Workflows.**
-6.  **Further Tool Ecosystem Expansion (Rscript, specialized DB queries, etc.).**
+        * Invocation: LangGraph Controller node decides to use `PythonSandboxTool`. [cite: 468]
+        * Input: Natural language description of the sub-task, relevant context. [cite: 469, 578]
+        * Internal LLM (Code Generation): Translates sub-task to Python script. [cite: 470, 579]
+        * Sandboxed Execution: Secure, isolated environment (e.g., Docker, restricted interpreter) with controlled library/file access. [cite: 471, 472, 473, 474, 580] May allow calling other atomic tools. [cite: 474]
+        * Output: Script output (stdout, stderr), generated files, success/error status. [cite: 475, 581]
+    * **Benefits:** Massive flexibility, reduced need for hyper-specific tools, leverages specialized coding models, enhanced problem-solving. [cite: 476, 477, 478, 479, 582, 583]
+    * **Challenges & Considerations:** Sandbox security, reliability of generated code (potential for LangGraph-based debug loops), prompt engineering, resource management, observability. [cite: 480, 481, 482, 483, 484, 485, 584]
+2.  **True Asynchronous Background Task Processing (Enabled by LangGraph's State/Checkpointing).** [cite: 451, 486, 576]
+3.  **More Complex Agentic Behaviors (Advanced Self-Correction, Multi-Actor Agents).** [cite: 452, 486]
+4.  **Persistent Agent State / Memory (across sessions for long-running tasks).** [cite: 486]
+5.  **Sophisticated Human-in-the-Loop (HITL) Workflows.** [cite: 486]
+6.  **Further Tool Ecosystem Expansion (Rscript, specialized DB queries, etc.).** [cite: 453, 486]
 
 ## Open Questions / Areas for Investigation with LangGraph & CodeAct Hybrid
+* Design of the `PythonSandboxTool`'s internal LLM prompting.
+* Security and isolation for the Python sandbox.
+* Error handling and debugging for LLM-generated code by `PythonSandboxTool`. [cite: 483]
+* Context passing to `PythonSandboxTool` for relevant code generation. [cite: 487]
+* Interaction between LangGraph cancellation and sandbox execution. [cite: 488]
 
-* **Design of the `PythonSandboxTool`'s internal LLM prompting for reliable and safe code generation.**
-* **Security and isolation mechanisms for the Python sandbox.**
-* **Error handling and debugging strategies for LLM-generated code executed by the `PythonSandboxTool`.**
-* How to best pass context (e.g., available data files, schemas) to the `PythonSandboxTool` for its internal LLM to generate relevant code.
-* Interaction between LangGraph's main cancellation mechanisms and long-running code execution within the sandbox tool.
-
-This hybrid approach, with LangGraph as the backbone and a CodeAct-inspired `PythonSandboxTool` as a key capability, seems like a very promising direction to achieve the desired power, flexibility, and control.
+This hybrid approach, with LangGraph as the backbone and a CodeAct-inspired `PythonSandboxTool` as a key capability, seems like a very promising direction to achieve the desired power, flexibility, and control. [cite: 489]
