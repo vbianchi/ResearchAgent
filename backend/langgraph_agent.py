@@ -17,13 +17,14 @@ from .intent_classifier import classify_intent, IntentClassificationOutput
 from .planner import generate_plan 
 from .controller import validate_and_prepare_step_action, ControllerOutput 
 from .evaluator import evaluate_step_outcome_and_suggest_correction, evaluate_plan_outcome, StepCorrectionOutcome, EvaluationResult
-from backend.callbacks import WebSocketCallbackHandler, LOG_SOURCE_EXECUTOR, LOG_SOURCE_EVALUATOR_STEP, LOG_SOURCE_EVALUATOR_OVERALL
+from backend.callbacks import WebSocketCallbackHandler, LOG_SOURCE_EXECUTOR, LOG_SOURCE_EVALUATOR_STEP, LOG_SOURCE_EVALUATOR_OVERALL, LOG_SOURCE_CONTROLLER
 
 logger = logging.getLogger(__name__)
 
 # --- Node Definitions ---
-# intent_classifier_node, planner_node, controller_node, executor_node (as in Canvas 15)
-# These are assumed to be correctly defined. For brevity, only step_evaluator_node and routing are shown fully.
+# intent_classifier_node, planner_node (as in Canvas 17)
+# executor_node, overall_evaluator_node (as in Canvas 17)
+# For brevity, only modified nodes (controller_node, step_evaluator_node) and routing are shown fully.
 
 async def intent_classifier_node(state: ResearchAgentState, config: RunnableConfig):
     logger.info("--- Entering Intent Classifier Node ---")
@@ -66,6 +67,7 @@ async def planner_node(state: ResearchAgentState, config: RunnableConfig):
         logger.error("Planner Node: User query is missing from state.")
         safe_existing_messages = existing_messages if isinstance(existing_messages, list) else []
         new_messages = safe_existing_messages + [AIMessage(content="System Error: User query was not found for planning.")]
+        # Initialize loop counters even on planning failure to ensure state schema consistency for router
         return {**state, "plan_generation_error": "User query is missing for planning.", "messages": new_messages, "current_step_index": 0, "retry_count_for_current_step": 0}
     callback_handler_from_config = config.get("callbacks")
     try:
@@ -90,7 +92,6 @@ async def planner_node(state: ResearchAgentState, config: RunnableConfig):
         ai_message_content = f"Plan Generated:\nSummary: {plan_summary}\nNumber of steps: {len(plan_steps)}"
         safe_existing_messages = existing_messages if isinstance(existing_messages, list) else []
         new_messages = safe_existing_messages + [AIMessage(content=ai_message_content)]
-        # Initialize step_index and retry_count here for the start of the loop
         return {**state, "plan_summary": plan_summary, "plan_steps": plan_steps, 
                 "plan_generation_error": None, "messages": new_messages, 
                 "error_message": None, "current_step_index": 0, "retry_count_for_current_step": 0 } 
@@ -106,24 +107,31 @@ async def controller_node(state: ResearchAgentState, config: RunnableConfig):
     original_user_query = state.get("user_query")
     plan_steps = state.get("plan_steps")
     current_step_idx = state.get("current_step_index") 
+    retry_count = state.get("retry_count_for_current_step", 0) # Get current retry count
+
     existing_messages = state.get("messages", [])
     if not isinstance(existing_messages, list):
         logger.warning("controller_node: 'messages' in state was not a list, resetting.")
         existing_messages = [msg for msg in existing_messages if hasattr(msg, 'content')] if existing_messages else []
+
     if current_step_idx is None: 
-        logger.error("Controller Node: current_step_index is None. This might mean the plan ended or an error occurred before setting it.")
-        new_messages = existing_messages + [AIMessage(content="System Error: Step index not initialized for Controller. Plan might be complete or failed.")]
+        logger.error("Controller Node: current_step_index is None.")
+        new_messages = existing_messages + [AIMessage(content="System Error: Step index not initialized for Controller.")]
         return {**state, "controller_error": "Step index not initialized, plan likely ended.", "messages": new_messages}
+        
     if not original_user_query:
         logger.error("Controller Node: Original user query missing from state.")
         new_messages = existing_messages + [AIMessage(content="System Error: Original query missing for Controller.")]
         return {**state, "controller_error": "Original user query missing.", "messages": new_messages}
+
     if not plan_steps or not isinstance(plan_steps, list) or current_step_idx >= len(plan_steps):
-        logger.warning(f"Controller Node: current_step_idx ({current_step_idx}) is out of bounds for plan_steps (len: {len(plan_steps) if plan_steps else 0}). Assuming plan completion.")
-        new_messages = existing_messages + [AIMessage(content="System Info: Controller determined no more steps to process.")]
-        return {**state, "controller_error": "No valid next step (plan likely complete).", "messages": new_messages} # This will route to overall_evaluator
+        logger.warning(f"Controller Node: current_step_idx ({current_step_idx}) out of bounds for plan_steps (len: {len(plan_steps) if plan_steps else 0}). Plan likely complete or error.")
+        new_messages = existing_messages + [AIMessage(content="System Info: Controller determined no more valid steps to process.")]
+        return {**state, "controller_error": "No valid next step (plan likely complete).", "messages": new_messages} 
+    
     current_plan_step_dict = plan_steps[current_step_idx]
-    logger.info(f"Controller Node: Processing Step {current_step_idx + 1}/{len(plan_steps)}: {current_plan_step_dict.get('description')}")
+    logger.info(f"Controller Node: Processing Step {current_step_idx + 1}/{len(plan_steps)}: '{current_plan_step_dict.get('description')}' (Attempt: {retry_count + 1})")
+
     previous_executor_output = state.get("previous_step_executor_output") 
     current_task_id_for_tools = state.get("task_id")
     try: tools = get_dynamic_tools(current_task_id_for_tools)
@@ -131,43 +139,77 @@ async def controller_node(state: ResearchAgentState, config: RunnableConfig):
         logger.error(f"Controller Node: Failed to load tools: {e}", exc_info=True)
         new_messages = existing_messages + [AIMessage(content=f"System Error: Failed to load tools for Controller: {e}")]
         return {**state, "controller_error": f"Failed to load tools: {e}", "messages": new_messages}
+
     callback_handler_from_config = config.get("callbacks")
+    
+    step_to_validate = current_plan_step_dict.copy() # Start with the original step definition
+    if retry_count > 0:
+        logger.info(f"Controller Node: This is a retry (attempt {retry_count + 1}). Using evaluator suggestions if available.")
+        evaluator_suggested_tool = state.get("step_evaluation_suggested_tool")
+        evaluator_suggested_instructions = state.get("step_evaluation_suggested_input_instructions")
+        
+        if evaluator_suggested_tool is not None: # Can be "None" (string) or a tool name
+            step_to_validate["tool_to_use"] = evaluator_suggested_tool 
+            logger.info(f"  Retry: Overriding tool to: '{evaluator_suggested_tool}'")
+        elif "tool_to_use" not in step_to_validate : # Ensure it exists from original plan
+             step_to_validate["tool_to_use"] = current_plan_step_dict.get("tool_to_use")
+
+        if evaluator_suggested_instructions is not None:
+            step_to_validate["tool_input_instructions"] = evaluator_suggested_instructions
+            logger.info(f"  Retry: Overriding input instructions to: '{evaluator_suggested_instructions[:100]}...'")
+        elif "tool_input_instructions" not in step_to_validate: # Ensure it exists
+             step_to_validate["tool_input_instructions"] = current_plan_step_dict.get("tool_input_instructions")
+    
     try:
         controller_result: Dict[str, Any] = await validate_and_prepare_step_action(
-            original_user_query=original_user_query, current_plan_step=current_plan_step_dict,
-            available_tools=tools, previous_step_executor_output=previous_executor_output,
-            controller_llm_id_override=None, callback_handler=callback_handler_from_config)
+            original_user_query=original_user_query, 
+            current_plan_step=step_to_validate, # Use the (potentially modified for retry) step
+            available_tools=tools, 
+            previous_step_executor_output=previous_executor_output,
+            controller_llm_id_override=None, # TODO: Get from state if session override exists
+            callback_handler=callback_handler_from_config
+        )
+
         if controller_result.get("controller_error"):
-            error_msg = f"Controller Error for Step {current_step_idx + 1}: {controller_result['controller_error']}"
+            error_msg = f"Controller Error for Step {current_step_idx + 1} (Attempt {retry_count + 1}): {controller_result['controller_error']}"
             logger.error(error_msg)
             new_messages = existing_messages + [AIMessage(content=error_msg)]
-            return {**state, **controller_result, "messages": new_messages}
-        ai_message_content = (f"Controller for Step {current_step_idx + 1}:\n"
+            # Preserve retry_count for the router to decide if it was a controller error during a retry
+            return {**state, **controller_result, "messages": new_messages, "retry_count_for_current_step": retry_count}
+
+        ai_message_content = (f"Controller for Step {current_step_idx + 1} (Attempt {retry_count + 1}):\n"
             f"  Tool: {controller_result.get('controller_tool_name', 'None')}\n"
             f"  Input (summary): {str(controller_result.get('controller_tool_input', 'N/A'))[:100]}...\n"
             f"  Reasoning: {controller_result.get('controller_reasoning', 'N/A')}")
         new_messages = existing_messages + [AIMessage(content=ai_message_content)]
-        updated_state_before_executor = {
-            **state, **controller_result, "current_step_index": current_step_idx, 
-            "messages": new_messages, "current_executor_output": None, "executor_error_message": None,
+        
+        updated_state_fields = {
+            **controller_result, 
+            "current_step_index": current_step_idx, # Keep current step index
+            "retry_count_for_current_step": retry_count, # Pass along current retry count
+            "messages": new_messages, 
+            "current_executor_output": None, 
+            "executor_error_message": None,
             "step_evaluation_achieved_goal": None, "step_evaluation_assessment": None,
             "step_evaluation_is_recoverable": None, "step_evaluation_suggested_tool": None,
             "step_evaluation_suggested_input_instructions": None, 
             "step_evaluation_confidence_in_correction": None, "step_evaluation_error": None,
-            "error_message": None }
-        return updated_state_before_executor
+            "error_message": None 
+        }
+        return {**state, **updated_state_fields}
     except Exception as e:
-        logger.error(f"Controller Node: Unexpected error for step {current_step_idx + 1}: {e}", exc_info=True)
-        error_msg_content = f"System Error in Controller Node for step {current_step_idx + 1}: {str(e)}"
+        logger.error(f"Controller Node: Unexpected error for step {current_step_idx + 1} (Attempt {retry_count + 1}): {e}", exc_info=True)
+        error_msg_content = f"System Error in Controller Node for step {current_step_idx + 1} (Attempt {retry_count + 1}): {str(e)}"
         new_messages = existing_messages + [AIMessage(content=error_msg_content)]
-        return {**state, "controller_error": f"Unexpected error in Controller: {str(e)}", "messages": new_messages}
+        return {**state, "controller_error": f"Unexpected error in Controller: {str(e)}", "messages": new_messages, "retry_count_for_current_step": retry_count}
 
 async def executor_node(state: ResearchAgentState, config: RunnableConfig):
-    logger.info("--- Entering Executor Node ---") 
+    logger.info("--- Entering Executor Node ---") # ... (executor_node remains the same as Canvas 16)
     tool_name = state.get("controller_tool_name")
     tool_input_str = state.get("controller_tool_input")
     task_id = state.get("task_id")
     current_step_idx = state.get("current_step_index", 0) 
+    retry_count = state.get("retry_count_for_current_step", 0)
     plan_steps = state.get("plan_steps", [])
     step_description = "N/A"
     if plan_steps and current_step_idx < len(plan_steps):
@@ -176,7 +218,7 @@ async def executor_node(state: ResearchAgentState, config: RunnableConfig):
     if not isinstance(existing_messages, list):
         logger.warning("executor_node: 'messages' in state was not a list, resetting.")
         existing_messages = [msg for msg in existing_messages if hasattr(msg, 'content')] if existing_messages else []
-    logger.info(f"Executor Node: Task ID '{task_id}', Step {current_step_idx + 1} ('{step_description}'). Tool: '{tool_name}', Input: '{str(tool_input_str)[:100]}...'")
+    logger.info(f"Executor Node: Task ID '{task_id}', Step {current_step_idx + 1} ('{step_description}'), Attempt {retry_count + 1}. Tool: '{tool_name}', Input: '{str(tool_input_str)[:100]}...'")
     output_str_from_execution = "" 
     error_msg_from_execution = None 
     callback_handler_from_config = config.get("callbacks")
@@ -216,16 +258,18 @@ async def executor_node(state: ResearchAgentState, config: RunnableConfig):
     else:
         logger.warning("Executor Node: No tool name and no tool input provided for step.")
         output_str_from_execution = "Executor: No specific action taken as no tool or direct LLM input was provided by the controller for this step."
-    ai_message_content = f"Executor (Step {current_step_idx + 1}):\nTool: {tool_name or 'None'}\nOutput: {str(output_str_from_execution)[:500]}{'...' if len(str(output_str_from_execution)) > 500 else ''}"
+    ai_message_content = f"Executor (Step {current_step_idx + 1}, Attempt {retry_count + 1}):\nTool: {tool_name or 'None'}\nOutput: {str(output_str_from_execution)[:500]}{'...' if len(str(output_str_from_execution)) > 500 else ''}"
     if error_msg_from_execution: ai_message_content += f"\nError: {error_msg_from_execution}"
     new_messages = existing_messages + [AIMessage(content=ai_message_content)]
     return {**state, "current_executor_output": str(output_str_from_execution), "executor_error_message": error_msg_from_execution, "messages": new_messages, "error_message": None}
+
 
 async def step_evaluator_node(state: ResearchAgentState, config: RunnableConfig):
     logger.info("--- Entering Step Evaluator Node ---")
     original_user_query = state.get("user_query")
     plan_steps = state.get("plan_steps")
     current_step_idx = state.get("current_step_index", 0) 
+    retry_count_for_step_just_attempted = state.get("retry_count_for_current_step", 0)
     controller_tool_used = state.get("controller_tool_name")
     controller_tool_input_str = state.get("controller_tool_input")
     executor_output_str = state.get("current_executor_output", "") 
@@ -239,9 +283,12 @@ async def step_evaluator_node(state: ResearchAgentState, config: RunnableConfig)
         error_msg = "Step Evaluator: Missing critical info (query, plan, or valid step index)."
         logger.error(error_msg + f" Index: {current_step_idx}, Plan len: {len(plan_steps) if plan_steps else 'N/A'}")
         new_messages = existing_messages + [AIMessage(content=f"System Error: {error_msg}")]
-        return {**state, "step_evaluation_error": error_msg, "step_evaluation_achieved_goal": False, "messages": new_messages}
+        # Ensure essential fields for routing are set even on this early error
+        return {**state, "step_evaluation_error": error_msg, "step_evaluation_achieved_goal": False, 
+                "step_evaluation_is_recoverable": False, "messages": new_messages}
+
     current_plan_step_dict = plan_steps[current_step_idx]
-    logger.info(f"Step Evaluator Node: Evaluating Step {current_step_idx + 1}: {current_plan_step_dict.get('description')}")
+    logger.info(f"Step Evaluator Node: Evaluating Step {current_step_idx + 1} (Attempt {retry_count_for_step_just_attempted + 1}): {current_plan_step_dict.get('description')}")
     try: tools = get_dynamic_tools(task_id)
     except Exception as e:
         logger.error(f"Step Evaluator Node: Failed to load tools: {e}", exc_info=True)
@@ -249,9 +296,6 @@ async def step_evaluator_node(state: ResearchAgentState, config: RunnableConfig)
         return {**state, "step_evaluation_error": f"Failed to load tools: {e}", "step_evaluation_achieved_goal": False, "messages": new_messages}
     
     callback_handler_from_config = config.get("callbacks")
-    
-    # Prepare the dictionary to be returned, starting with a copy of the current state
-    # This ensures fields not touched by the evaluator are preserved.
     updated_state_for_return = {**state} 
 
     try:
@@ -261,15 +305,12 @@ async def step_evaluator_node(state: ResearchAgentState, config: RunnableConfig)
             step_executor_output=executor_output_str, available_tools=tools,
             evaluator_llm_id_override=None, callback_handler=callback_handler_from_config)
         
-        # Merge evaluation results into the state copy
-        for key, value in evaluation_result_dict.items(): 
-            updated_state_for_return[key] = value
-        if "step_evaluation_error" not in evaluation_result_dict: # Ensure it's explicitly None if no error
-             updated_state_for_return["step_evaluation_error"] = None
+        for key, value in evaluation_result_dict.items(): updated_state_for_return[key] = value
+        if "step_evaluation_error" not in evaluation_result_dict: updated_state_for_return["step_evaluation_error"] = None
         
         assessment = updated_state_for_return.get('step_evaluation_assessment', 'N/A')
         achieved = updated_state_for_return.get('step_evaluation_achieved_goal', False)
-        ai_message_content = (f"Step Evaluator (Step {current_step_idx + 1}):\n"
+        ai_message_content = (f"Step Evaluator (Step {current_step_idx + 1}, Attempt {retry_count_for_step_just_attempted + 1}):\n"
             f"  Achieved Goal: {achieved}\n"
             f"  Assessment: {assessment[:300]}{'...' if len(assessment) > 300 else ''}")
         if not achieved and updated_state_for_return.get('step_evaluation_is_recoverable'):
@@ -277,61 +318,65 @@ async def step_evaluator_node(state: ResearchAgentState, config: RunnableConfig)
         
         new_messages = existing_messages + [AIMessage(content=ai_message_content)]
         updated_state_for_return["messages"] = new_messages
-        updated_state_for_return["error_message"] = None # Clear general graph error if evaluator itself succeeded
+        updated_state_for_return["error_message"] = None 
 
-        # Logic for advancing step_index or preparing for retry
         if achieved:
             next_step_idx_to_prepare_for = current_step_idx + 1
             plan_steps_list = state.get("plan_steps", []) 
             if next_step_idx_to_prepare_for < len(plan_steps_list):
                 logger.info(f"Step Evaluator: Step {current_step_idx + 1} successful. Preparing for next step {next_step_idx_to_prepare_for + 1}.")
                 updated_state_for_return["current_step_index"] = next_step_idx_to_prepare_for
-                updated_state_for_return["retry_count_for_current_step"] = 0
-                updated_state_for_return["previous_step_executor_output"] = state.get("current_executor_output") # Carry over this step's output
-                # Clear fields for the next iteration of controller/executor/evaluator
+                updated_state_for_return["retry_count_for_current_step"] = 0 
+                updated_state_for_return["previous_step_executor_output"] = state.get("current_executor_output") 
+                # Clear fields for the next fresh step
                 for key_to_clear in ["controller_tool_name", "controller_tool_input", "controller_reasoning", 
                                      "controller_confidence", "controller_error", "current_executor_output", 
-                                     "executor_error_message", "step_evaluation_achieved_goal", 
-                                     "step_evaluation_assessment", "step_evaluation_is_recoverable", 
-                                     "step_evaluation_suggested_tool", "step_evaluation_suggested_input_instructions",
-                                     "step_evaluation_confidence_in_correction", "step_evaluation_error"]:
+                                     "executor_error_message", 
+                                     # Keep current step_evaluation fields as they are from this evaluation
+                                     # They will be overwritten by the next step's evaluation or cleared by controller if needed
+                                     # "step_evaluation_achieved_goal", "step_evaluation_assessment", etc.
+                                     "step_evaluation_suggested_tool", # Clear retry suggestions
+                                     "step_evaluation_suggested_input_instructions",
+                                     "step_evaluation_confidence_in_correction"
+                                     ]: 
                     updated_state_for_return[key_to_clear] = None 
             else: 
                 logger.info(f"Step Evaluator: Step {current_step_idx + 1} successful. All plan steps completed.")
-                updated_state_for_return["current_step_index"] = len(plan_steps_list) # Signal completion
+                updated_state_for_return["current_step_index"] = len(plan_steps_list) 
         else: # Step failed
-            current_retry_count = state.get("retry_count_for_current_step", 0)
-            logger.warning(f"Step Evaluator: Step {current_step_idx + 1} failed. Current retry count (before this failure): {current_retry_count}")
-            if updated_state_for_return.get("step_evaluation_is_recoverable") and current_retry_count < settings.agent_max_step_retries:
-                 updated_state_for_return["retry_count_for_current_step"] = current_retry_count + 1 # Increment for next attempt
-                 logger.info(f"Step Evaluator: Step failed but is recoverable. Setting retry_count to {updated_state_for_return['retry_count_for_current_step']} for next attempt.")
-            else: # Not recoverable or retries exhausted
-                 updated_state_for_return["retry_count_for_current_step"] = current_retry_count # Keep as is, router will see max retries exceeded
-                 logger.info(f"Step Evaluator: Step failed and is not recoverable or retries exhausted (attempt {current_retry_count +1}).")
-            updated_state_for_return["current_step_index"] = current_step_idx # Stay on the same step for retry or final fail decision by router
-            # Clear executor output for retry, but keep controller's decision and evaluator's suggestions
-            updated_state_for_return["current_executor_output"] = None
-            updated_state_for_return["executor_error_message"] = None
-
-
+            logger.warning(f"Step Evaluator: Step {current_step_idx + 1} (Attempt {retry_count_for_step_just_attempted + 1}) failed.")
+            updated_state_for_return["current_step_index"] = current_step_idx # Stay on the same step
+            if updated_state_for_return.get("step_evaluation_is_recoverable") and retry_count_for_step_just_attempted < settings.agent_max_step_retries:
+                 updated_state_for_return["retry_count_for_current_step"] = retry_count_for_step_just_attempted + 1
+                 logger.info(f"  Step Evaluator: Preparing for retry attempt {updated_state_for_return['retry_count_for_current_step']} for step {current_step_idx + 1}.")
+                 # Clear executor output for retry. Controller fields will be re-evaluated.
+                 # Retry suggestions (step_evaluation_suggested_tool etc.) are already in updated_state_for_return from evaluation_result_dict.
+                 updated_state_for_return["current_executor_output"] = None
+                 updated_state_for_return["executor_error_message"] = None
+                 # Clear previous controller decision for the retry
+                 updated_state_for_return["controller_tool_name"] = None
+                 updated_state_for_return["controller_tool_input"] = None
+                 updated_state_for_return["controller_reasoning"] = None
+                 updated_state_for_return["controller_confidence"] = None
+                 updated_state_for_return["controller_error"] = None
+            else: 
+                 # Not recoverable or max retries hit, keep current retry_count for router to see
+                 updated_state_for_return["retry_count_for_current_step"] = retry_count_for_step_just_attempted
         return updated_state_for_return
-
     except Exception as e:
         logger.error(f"Step Evaluator Node: Unexpected error for step {current_step_idx + 1}: {e}", exc_info=True)
         error_msg_content = f"System Error in Step Evaluator Node for step {current_step_idx + 1}: {str(e)}"
         new_messages = existing_messages + [AIMessage(content=error_msg_content)]
-        return {
-            **state, # Return previous state on unexpected error to avoid losing all context
-            "step_evaluation_error": f"Unexpected error in Step Evaluator: {str(e)}",
-            "step_evaluation_achieved_goal": False, 
-            "messages": new_messages
-        }
+        return {**state, "step_evaluation_error": f"Unexpected error in Step Evaluator: {str(e)}", "step_evaluation_achieved_goal": False, "messages": new_messages}
 
 async def overall_evaluator_node(state: ResearchAgentState, config: RunnableConfig):
-    logger.info("--- Entering Overall Evaluator Node ---") # ... (rest of overall_evaluator_node as in Canvas 14)
+    logger.info("--- Entering Overall Evaluator Node ---") 
     original_user_query = state.get("user_query", "N/A")
     messages_history = state.get("messages", [])
-    final_executor_output = state.get("current_executor_output") 
+    # Use previous_step_executor_output if current_executor_output is None (e.g. after a loop)
+    # This assumes previous_step_executor_output holds the last *meaningful* step output if plan completed.
+    final_agent_answer_candidate = state.get("current_executor_output") or state.get("previous_step_executor_output")
+    
     existing_messages = state.get("messages", [])
     if not isinstance(existing_messages, list):
         logger.warning("overall_evaluator_node: 'messages' in state was not a list, resetting.")
@@ -341,25 +386,28 @@ async def overall_evaluator_node(state: ResearchAgentState, config: RunnableConf
         if isinstance(msg, AIMessage) and hasattr(msg, 'content'):
             if "Plan Generated:" in msg.content or "Controller for Step" in msg.content or \
                "Executor (Step" in msg.content or "Step Evaluator (Step" in msg.content or \
-               "Planning Error:" in msg.content or "Controller Error for Step" in msg.content or \
-               "System Error in Controller Node" in msg.content or "Tool Execution Error:" in msg.content or \
-               "LLM Execution Error:" in msg.content or "Step Evaluation Error for Step" in msg.content:
+               "Planning Error:" in msg.content or "Controller Error" in msg.content or \
+               "Tool Execution Error:" in msg.content or "LLM Execution Error:" in msg.content or \
+               "Step Evaluation Error" in msg.content: # Added more error types
                 plan_execution_summary_parts.append(msg.content)
     executed_plan_summary_str = "\n---\n".join(plan_execution_summary_parts)
-    if not executed_plan_summary_str: executed_plan_summary_str = "No detailed execution summary could be constructed from messages. Plan may have failed early or was a direct QA."
     
     # Add overall plan status to summary string
-    if state.get("plan_generation_error"): executed_plan_summary_str += f"\n\nPLANNING FAILED: {state.get('plan_generation_error')}"
-    elif state.get("controller_error"): executed_plan_summary_str += f"\n\nCONTROLLER FAILED: {state.get('controller_error')}"
-    elif state.get("executor_error_message"): executed_plan_summary_str += f"\n\nLAST EXECUTOR FAILED: {state.get('executor_error_message')}"
-    elif state.get("step_evaluation_error"): executed_plan_summary_str += f"\n\nLAST STEP EVALUATION FAILED: {state.get('step_evaluation_error')}"
+    if state.get("plan_generation_error"): executed_plan_summary_str += f"\n\nFINAL STATUS: PLANNING FAILED: {state.get('plan_generation_error')}"
+    elif state.get("controller_error"): executed_plan_summary_str += f"\n\nFINAL STATUS: CONTROLLER FAILED on step {state.get('current_step_index', -1)+1}: {state.get('controller_error')}"
+    elif state.get("executor_error_message"): executed_plan_summary_str += f"\n\nFINAL STATUS: EXECUTOR FAILED on step {state.get('current_step_index', -1)+1}: {state.get('executor_error_message')}"
+    elif state.get("step_evaluation_error"): executed_plan_summary_str += f"\n\nFINAL STATUS: STEP EVALUATION FAILED for step {state.get('current_step_index', -1)+1}: {state.get('step_evaluation_error')}"
     elif state.get("current_step_index", 0) >= len(state.get("plan_steps",[])) and state.get("step_evaluation_achieved_goal") :
-        executed_plan_summary_str += "\n\nALL PLANNED STEPS COMPLETED SUCCESSFULLY."
+        executed_plan_summary_str += "\n\nFINAL STATUS: ALL PLANNED STEPS COMPLETED SUCCESSFULLY."
+    elif not state.get("step_evaluation_achieved_goal", True) and state.get("plan_steps"): # Plan attempted but a step failed unrecoverably
+        executed_plan_summary_str += f"\n\nFINAL STATUS: PLAN EXECUTION FAILED at step {state.get('current_step_index', -1)+1}. Last assessment: {state.get('step_evaluation_assessment')}"
     elif state.get("classified_intent") != "PLAN":
-        executed_plan_summary_str = "Intent was not 'PLAN'. Direct processing or error occurred earlier."
-        if not final_executor_output and len(messages_history) > 1: # For DIRECT_QA, last AI message might be the answer
-            final_executor_output = messages_history[-1].content if isinstance(messages_history[-1], AIMessage) else None
+        executed_plan_summary_str = f"INTENT: {state.get('classified_intent')}.\n" + (messages_history[-1].content if messages_history and isinstance(messages_history[-1], AIMessage) else "No direct answer found in messages.")
+        if not final_agent_answer_candidate and messages_history and isinstance(messages_history[-1], AIMessage): # For DIRECT_QA, last AI message might be the answer
+            final_agent_answer_candidate = messages_history[-1].content
 
+
+    if not executed_plan_summary_str: executed_plan_summary_str = "No detailed execution summary could be constructed. Plan may have failed very early or was not a planning intent."
 
     logger.info(f"Overall Evaluator: Evaluating plan for query: '{original_user_query[:100]}...'")
     callback_handler_from_config = config.get("callbacks")
@@ -367,7 +415,7 @@ async def overall_evaluator_node(state: ResearchAgentState, config: RunnableConf
     try:
         overall_eval_result_dict: Dict[str, Any] = await evaluate_plan_outcome(
             original_user_query=original_user_query, executed_plan_summary_str=executed_plan_summary_str,
-            final_agent_answer_from_last_step=final_executor_output, 
+            final_agent_answer_from_last_step=final_agent_answer_candidate, 
             evaluator_llm_id_override=None, callback_handler=callback_handler_from_config)
         for key, value in overall_eval_result_dict.items(): return_state_update[key] = value
         if "overall_evaluation_error" not in overall_eval_result_dict: return_state_update["overall_evaluation_error"] = None
@@ -390,6 +438,7 @@ async def overall_evaluator_node(state: ResearchAgentState, config: RunnableConf
         return {**state, "overall_evaluation_error": f"Unexpected error in Overall Evaluator: {str(e)}", "overall_evaluation_success": False, "messages": new_messages}
 
 # --- Graph Definition ---
+# (Graph Definition and Edges remain the same as Canvas 16)
 workflow_builder = StateGraph(ResearchAgentState)
 workflow_builder.add_node("intent_classifier", intent_classifier_node)
 workflow_builder.add_node("planner", planner_node)
@@ -400,17 +449,16 @@ workflow_builder.add_node("overall_evaluator", overall_evaluator_node)
 
 workflow_builder.set_entry_point("intent_classifier")
 
-# --- Routing Functions ---
 def route_after_intent_classification(state: ResearchAgentState):
     intent = state.get("classified_intent")
-    if state.get("error_message"): # Error in intent classification itself
+    if state.get("error_message"): 
         logger.error(f"Routing from Intent: Error detected ({state['error_message']}). Proceeding to Overall Evaluator.")
         return "overall_evaluator"
     if intent == "PLAN":
         logger.info("Routing from Intent: Intent is PLAN, proceeding to planner.")
         return "planner"
     else: 
-        logger.info(f"Routing from Intent: Intent is '{intent}', proceeding to Overall Evaluator to provide direct answer or summary.")
+        logger.info(f"Routing from Intent: Intent is '{intent}', proceeding to Overall Evaluator.")
         return "overall_evaluator"
 
 def route_after_planner(state: ResearchAgentState):
@@ -424,11 +472,11 @@ def route_after_controller(state: ResearchAgentState):
     if state.get("controller_error"): 
         logger.error(f"Routing from Controller: Controller error: {state['controller_error']}. Proceeding to Overall Evaluator.")
         return "overall_evaluator" 
-    # Check if controller decided there are no more steps (e.g., index out of bounds)
     plan_steps = state.get("plan_steps", [])
     current_step_idx = state.get("current_step_index")
-    if current_step_idx is not None and current_step_idx >= len(plan_steps):
-        logger.info("Routing from Controller: No more steps to process (index out of bounds). Proceeding to Overall Evaluator.")
+    # This condition means the controller itself determined there are no more valid steps
+    if current_step_idx is not None and current_step_idx >= len(plan_steps) and "No valid next step" in str(state.get("controller_error")):
+        logger.info("Routing from Controller: No more steps indicated by controller. Proceeding to Overall Evaluator.")
         return "overall_evaluator"
     logger.info("Routing from Controller: Controller finished, proceeding to executor.")
     return "executor"
@@ -441,45 +489,41 @@ def route_after_step_evaluation(state: ResearchAgentState):
     logger.info("--- Routing Decision after Step Evaluation ---")
     achieved_goal = state.get("step_evaluation_achieved_goal")
     is_recoverable = state.get("step_evaluation_is_recoverable")
-    current_step_idx_evaluated = state.get("current_step_index", 0) # This is the index that was just evaluated
+    # current_step_index from state is the index that was JUST evaluated (if failed and preparing for retry)
+    # OR it's the index of the NEXT step (if current step succeeded).
+    # This is because step_evaluator_node updates current_step_index based on outcome.
+    idx_for_next_action = state.get("current_step_index", 0) 
     plan_steps = state.get("plan_steps", [])
-    # retry_count_for_current_step is the count *before* this potential retry decision
-    retry_count_for_attempt_just_made = state.get("retry_count_for_current_step", 0) 
+    # retry_count_for_current_step in state is the count for the *next* attempt of the *current failed step*.
+    retry_count_for_next_attempt = state.get("retry_count_for_current_step", 0) 
     max_retries = settings.agent_max_step_retries 
 
-    logger.info(f"Router after Step Eval: achieved_goal={achieved_goal}, is_recoverable={is_recoverable}, step_idx_evaluated={current_step_idx_evaluated}, plan_len={len(plan_steps)}, retries_done_for_this_step={retry_count_for_attempt_just_made}")
+    # This log needs to be careful about what current_step_idx means here
+    logger.info(f"Router after Step Eval: achieved_goal={achieved_goal}, is_recoverable={is_recoverable}, idx_for_next_action={idx_for_next_action}, plan_len={len(plan_steps)}, retry_for_next_attempt={retry_count_for_next_attempt}")
 
     if state.get("step_evaluation_error"):
         logger.error(f"Routing: Step evaluation itself failed: {state['step_evaluation_error']}. Proceeding to Overall Evaluator.")
         return "overall_evaluator" 
 
     if achieved_goal:
-        # step_evaluator_node should have updated current_step_index to the *next* step's index
-        # or to len(plan_steps) if all done.
-        next_step_to_process_idx = state.get("current_step_index") 
-        logger.info(f"Routing: Step {current_step_idx_evaluated + 1} achieved goal. Next step index in state: {next_step_to_process_idx}.")
-        
-        if next_step_to_process_idx is not None and next_step_to_process_idx < len(plan_steps):
-            logger.info(f"Routing: Proceeding to Controller for next step: {next_step_to_process_idx + 1} (index {next_step_to_process_idx})")
+        # If goal was achieved, step_evaluator_node would have set idx_for_next_action to current_step_idx + 1 or len(plan_steps)
+        if idx_for_next_action < len(plan_steps):
+            logger.info(f"Routing: Step successful. Proceeding to Controller for next step: {idx_for_next_action + 1} (index {idx_for_next_action})")
             return "controller"
         else: 
-            logger.info(f"Routing: All plan steps completed successfully (or last step processed). Index {next_step_to_process_idx} >= Plan length {len(plan_steps)}. Proceeding to Overall Evaluator.")
+            logger.info(f"Routing: All plan steps completed successfully. Index {idx_for_next_action} >= Plan length {len(plan_steps)}. Proceeding to Overall Evaluator.")
             return "overall_evaluator" 
     else: # Step failed
-        logger.warning(f"Routing: Step {current_step_idx_evaluated + 1} failed. Assessment: {state.get('step_evaluation_assessment')}")
-        # The retry_count_for_current_step in the state was set by step_evaluator_node for the *next* attempt
-        # if it deemed the step retryable.
-        # So, if is_recoverable, step_evaluator would have set retry_count_for_current_step = old_retry_count + 1
-        next_retry_attempt_count = state.get("retry_count_for_current_step", 0)
-
-        if is_recoverable and next_retry_attempt_count <= max_retries: # Check if the *next* attempt is within limits
-            logger.info(f"Routing: Step failed, but is recoverable. Proceeding to Controller for retry attempt {next_retry_attempt_count} of step {current_step_idx_evaluated + 1}.")
+        # idx_for_next_action is still the index of the FAILED step because step_evaluator_node kept it same for retry.
+        logger.warning(f"Routing: Step (index {idx_for_next_action}) failed. Assessment: {state.get('step_evaluation_assessment')}")
+        if is_recoverable and retry_count_for_next_attempt <= max_retries:
+            logger.info(f"Routing: Step failed, but is recoverable. Proceeding to Controller for retry attempt {retry_count_for_next_attempt} of step {idx_for_next_action + 1}.")
             return "controller" 
         else:
             if not is_recoverable:
-                logger.error(f"Routing: Step {current_step_idx_evaluated + 1} failed and is not recoverable. Proceeding to Overall Evaluator.")
-            else: # Retries exhausted
-                logger.error(f"Routing: Step {current_step_idx_evaluated + 1} failed. Retries exhausted ({next_retry_attempt_count-1} attempts made, max {max_retries}). Proceeding to Overall Evaluator.")
+                logger.error(f"Routing: Step {idx_for_next_action + 1} failed and is not recoverable. Proceeding to Overall Evaluator.")
+            else: 
+                logger.error(f"Routing: Step {idx_for_next_action + 1} failed. Retries exhausted ({retry_count_for_next_attempt-1 if retry_count_for_next_attempt > 0 else 0} attempts made, max {max_retries}). Proceeding to Overall Evaluator.")
             return "overall_evaluator"
 
 workflow_builder.add_conditional_edges("intent_classifier", route_after_intent_classification, {"planner": "planner", "overall_evaluator": "overall_evaluator"})
@@ -497,7 +541,7 @@ except Exception as e:
     research_agent_graph = None
 
 # --- Test Runner ---
-# (run_graph_example and __main__ block remain the same as Canvas 14)
+# (Unchanged from Canvas 16)
 async def run_graph_example(user_input: str, ws_callback_handler: Optional[WebSocketCallbackHandler] = None):
     if not research_agent_graph: logger.error("Graph not compiled."); return None
     initial_state: ResearchAgentState = {
