@@ -2,7 +2,7 @@
 
 This project provides a UI and backend for an AI agent system designed to assist with research tasks. It features a three-panel layout (Tasks, Chat, Monitor/Artifact Viewer) and connects via WebSockets to a Python backend.
 
-**Current Strategic Direction (Targeting v2.6.0): Migration to LangGraph for enhanced task control, state management, and robust asynchronous operations.**
+**Current Strategic Direction (Targeting v2.6.0): Migration to LangGraph for enhanced task control, state management, and robust asynchronous operations. This will also lay the groundwork for advanced capabilities like a CodeAct-inspired Python Sandbox Tool.**
 
 **Recent Developments (Leading to current state):**
 
@@ -12,71 +12,57 @@ This project provides a UI and backend for an AI agent system designed to assist
     * Developed a Plan-Code-Execute-Evaluate (PCEE) agent workflow.
     * Significant UI/UX refinements, including token counting, file uploads, in-chat tool feedback, and plan proposal UI.
 -   **Key Challenge Identified:** Reliable and immediate interruption/cancellation of agent tasks, especially long-running LLM calls or tool executions, proved consistently difficult within the previous LangChain `AgentExecutor` model. This also impacted UI responsiveness during task switching.
--   **Strategic Decision: Migrating to LangGraph:** To address these core challenges and enable more sophisticated future capabilities (like true background tasks), the project is now transitioning its backend agent architecture to **LangGraph**. LangGraph's explicit state management, checkpointing, and graph-based control flow are expected to provide better primitives for task lifecycle control.
+-   **Strategic Decision: Migrating to LangGraph:** To address these core challenges and enable more sophisticated future capabilities, the project is now transitioning its backend agent architecture to **LangGraph**. LangGraph's explicit state management, checkpointing, and graph-based control flow are expected to provide better primitives for task lifecycle control.
 
 **Known Issues & Immediate Next Steps (Focus on LangGraph Migration):**
 
 1.  **CRITICAL (MUST HAVE): LangGraph Migration & Core PCEE Re-implementation:**
     * **Goal:** Redesign and implement the existing Plan-Code-Execute-Evaluate (PCEE) workflow using LangGraph's stateful graph architecture.
-    * This includes migrating:
-        * Intent Classification as an entry point.
-        * Planner, Controller, Executor, and Evaluator components as nodes or sub-graphs within LangGraph.
-        * Tool integration and execution within graph nodes.
-        * Explicit state management for the PCEE loop using Pydantic models or TypedDicts.
-    * **Effort & Time:** This will be a significant undertaking, estimated to be the primary focus for the next development cycle.
+    * This includes migrating: Intent Classification, Planner, Controller, Executor logic, and Evaluators as nodes/sub-graphs. Tool integration within graph nodes. Explicit state management.
+    * **Effort & Time:** Primary focus for the current development cycle.
 
 2.  **HIGH (MUST HAVE - To be addressed *within* the LangGraph migration): Robust Task Interruption & Cancellation:**
-    * **Goal:** Leverage LangGraph's interrupt mechanisms (e.g., human-in-the-loop patterns adapted for programmatic stops, `asyncio.Event` checks in streaming operations) and `asyncio.Task.cancel()` on graph execution tasks to achieve reliable and prompt stopping of agent operations.
-    * This will be a core design consideration during the LangGraph implementation.
+    * **Goal:** Leverage LangGraph's mechanisms and `asyncio` best practices for reliable and prompt stopping of agent operations.
 
-3.  **HIGH (MUST HAVE - Post initial LangGraph migration): Artifact Viewer Refresh:**
-    * **Goal:** Ensure the artifact viewer auto-updates reliably after file writes, integrated with LangGraph's state updates or events.
+3.  **HIGH (MUST HAVE - Post initial LangGraph migration): Artifact Viewer Refresh & Comprehensive Testing on New Architecture.**
 
-4.  **HIGH (MUST HAVE - Post initial LangGraph migration): Comprehensive Testing on New Architecture:**
-    * **Goal:** Develop and adapt unit and integration tests for the new LangGraph-based backend and ensure frontend compatibility.
-
-5.  **MEDIUM (SHOULD HAVE - During/After LangGraph Migration):**
-    * **Finalize Pydantic v2 Migration:** Ensure all data models (especially for graph state) are Pydantic v2.
-    * **"Plug and Play" Tool System on LangGraph:** Adapt the existing dynamic tool loading for seamless use within LangGraph nodes.
-    * **UI/UX Integration with LangGraph:**
-        * Ensure real-time UI updates (status, thinking, logs, chat messages) are effectively driven by LangGraph's streaming capabilities (e.g., `astream_events`).
-        * Refine "View [artifact] in Artifacts" links.
+4.  **MEDIUM (SHOULD HAVE - During/After LangGraph Migration):**
+    * Finalize Pydantic v2 Migration.
+    * Adapt "Plug and Play" Tool System for LangGraph.
+    * Ensure rich UI feedback via LangGraph's streaming.
 
 **Future Considerations & Enhancements (Post-LangGraph Stability):**
 
 -   **Concurrent Task Processing (Foreground/Background):**
-    * LangGraph's state management and checkpointing are expected to provide a much stronger foundation for implementing the "one active, one background" task model per user session. This will involve managing separate LangGraph instances and their states.
+    * LangGraph's state management and checkpointing will be key to implementing the "one active, one background" task model per user session.
 -   **Advanced Agent Reasoning & Self-Correction (Leveraging LangGraph's cyclical capabilities).**
--   **Comprehensive Tool Ecosystem Expansion.**
--   **Further UI/UX & Workspace Enhancements.**
+-   **Comprehensive Tool Ecosystem Expansion:**
+    * **Key Planned Feature: `PythonSandboxTool` (CodeAct-Inspired):**
+        * **Concept:** A powerful tool within LangGraph where the agent can request the execution of dynamically generated Python code to solve complex sub-tasks.
+        * **Mechanism:**
+            * Input: Natural language description of the sub-task & relevant context (e.g., filenames).
+            * Internal LLM (specialized for coding): Generates Python script to achieve the sub-task.
+            * Execution: Runs the generated script in a secure, isolated sandbox environment (e.g., Docker container or restricted Python interpreter) with controlled access to approved libraries, the task's workspace, and potentially other basic/safe tools via an API.
+            * Output: Results from the script execution (stdout, stderr, created/modified files, structured data).
+        * **Benefits:** Greatly enhances agent flexibility, allowing it to tackle novel problems not covered by predefined tools; reduces the need for numerous granular tools; allows for the use of highly capable coding LLMs for specific parts of a task.
+        * **Considerations:** Sandbox security and reliability of LLM-generated code are paramount.
+    * Development of other specialized tools (Rscript execution, advanced data analysis, bioinformatics database queries) will also be pursued.
+-   **Further UI/UX & Workspace Enhancements (e.g., Visual graph execution monitor, Integrated Folder Viewer).**
 -   **Backend & Architecture (Scalability, Personas).**
 -   **Deployment & DevOps.**
 
 ## Core Architecture & Workflow (Targeting LangGraph)
 The ResearchAgent will employ a stateful, graph-based architecture using LangGraph to manage the Plan-Code-Execute-Evaluate (PCEE) loop.
-
-1.  **User Input & Task Context:** Remains the same.
-2.  **Graph Initialization:** For a given user query, an instance of the main LangGraph will be created, defining the nodes (representing agent components like Planner, Controller, Tools, Executor, Evaluators) and edges (defining transitions based on state).
-3.  **State Management:** A Pydantic model or TypedDict will define the graph's state, which will be updated by each node and used for conditional routing. Checkpointing will persist this state.
-4.  **Execution Flow (PCEE as a Graph):**
-    * The graph execution will stream events (node starts/ends, state changes, LLM tokens) to the backend, which will then be relayed to the UI via WebSockets.
-    * **Intent Classification Node:** Determines PLAN vs. DIRECT_QA.
-    * **Planner Node:** Generates the plan (list of steps).
-    * **Controller Node:** For each step, determines the tool/action.
-    * **Executor Node(s)/Tool Node(s):** Executes the action.
-    * **Step Evaluator Node:** Evaluates step outcome, enabling retries by routing back to the Controller or Executor with modified state/input.
-    * **Overall Evaluator Node:** Assesses final outcome.
-    * The graph structure will allow for cycles (e.g., for retries) and conditional branching.
-5.  **Interruption/Cancellation:**
-    * UI STOP requests will signal the backend to interrupt the specific LangGraph execution (e.g., by cancelling its `asyncio.Task` and/or using LangGraph's interrupt mechanisms if applicable between node transitions).
-    * Context switching in the UI will also trigger cancellation/interruption of the graph associated with the previous task (unless backgrounding is implemented).
-6.  **Output to User:** Streamed from the graph, with final outputs collated as defined by the graph's end state.
+* **Graph Execution:** The graph execution will stream events (node starts/ends, state changes, LLM tokens) to the backend for UI updates.
+* **Nodes:** Will represent components like Intent Classification, Planning, Controller, Tool Execution (including the future `PythonSandboxTool`), and Evaluation.
+* **State Management:** A Pydantic model will define the graph's state, updated by nodes and used for conditional routing. Checkpointing will persist this state.
+* **Interruption/Cancellation:** Will leverage LangGraph's interrupt mechanisms and `asyncio` task cancellation on the graph execution task.
 
 ## Key Current Capabilities & Features (To be Re-established/Enhanced on LangGraph)
-The goal is to retain and improve upon the existing UI/UX features and tool functionalities within the new LangGraph architecture. This includes task management, chat interface, plan proposal/confirmation, LLM configuration, monitor/artifact viewing, token tracking, and file uploads. The "Plug and Play" tool system will be adapted.
+(Existing UI/UX features and tool functionalities will be adapted and improved on the LangGraph architecture.)
 
 ## Tech Stack
--   **Backend:** Python, **LangGraph**, LangChain (for LLM integrations, tool primitives), FastAPI (potentially for API endpoints if needed beyond WebSockets), WebSockets (`websockets` library), `aiohttp` (for file server), SQLite.
+-   **Backend:** Python, **LangGraph**, LangChain (for LLM integrations, tool primitives), WebSockets (`websockets` library), `aiohttp` (for file server), SQLite.
 -   **LLM Support:** Google Gemini, Ollama.
 -   **Frontend:** HTML, CSS, JavaScript (Modular).
 -   **Containerization:** Docker, Docker Compose.
