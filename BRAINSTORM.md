@@ -1,273 +1,75 @@
 # BRAINSTORM.md - ResearchAgent Project (V1.0 Go-Live Target & Beyond)
 
-This document tracks the current workflow, user feedback, and brainstorming ideas for the ResearchAgent project.
-
-## Current Version & State (Targeting V1.0 Go-Live)
-
-**Recent Key Advancements:**
-
-1\.  **Architectural Refactor: "Plug and Play" Tool System (COMPLETE & STABLE):** [cite: 51, 52, 53, 54, 55, 76, 77]
-
-    * Implemented a dynamic tool loading mechanism using `tool_config.json`. [cite: 52, 268]
-
-    * `tool_loader.py` parses the config and instantiates tools, including injecting runtime context like `task_workspace` for task-specific tools. [cite: 52, 269]
-
-    * All 9 tools (6 general-purpose + 3 task-specific) are dynamically loaded and operational. [cite: 53, 54, 77, 161, 300]
-
-    * This provides a scalable and maintainable foundation for future tool development. [cite: 55, 271]
-
-2\.  **Pydantic v2 Migration (Largely Complete):** [cite: 56]
-
-    * Most Pydantic models for Tool Argument Schemas and LLM Output Schemas migrated to v2. [cite: 57, 163, 273, 274]
-
-    * Fixes for Pydantic v2 strictness issues resolved. [cite: 57, 275]
-
-    * The `TypeError` in `deep_research_tool.py` related to `field_validator` and `each_item` has been addressed.
-
-3\.  **Core Agent Logic & Tool Integration (IMPROVED):**
-
-    * Controller logic refined. [cite: 59]
-
-    * Numerous import and runtime errors resolved. [cite: 60, 302]
-
-    * ReAct agent prompt in `backend/agent.py` updated for more reliable direct content generation.
-
-4\.  **Chat UI/UX Refinement (Significant Progress - features as previously listed):** [cite: 61, 63, 165]
-
-    * Visual Design & Readability improvements. [cite: 61, 166]
-
-    * Interactivity: Collapsible steps and tool outputs. [cite: 62, 167]
-
-    * Persistence & Consistency for plans. [cite: 62, 168]
-
-    * Bug fixes related to UI rendering and behavior. [cite: 63, 169]
-
-    * Completed Features: Token Counter, File Upload, In-Chat Tool Feedback, Plan Proposal UI. [cite: 63, 171]
-
-5\.  **History Handling:**
-
-    * Added `monitor_user_input` to known history types to resolve warnings.
-
-## Immediate Focus & User Feedback / Known Issues / Proposed Enhancements (V1.0 Go-Live Focus):
-
-1\.  **CRITICAL: Agent Task Cancellation & STOP Button:**
-
-    * **Issue:** Switching UI tasks or using STOP button needs to reliably cancel/stop active agent processing. [cite: 31, 33, 65, 172, 173, 174] Status updates can bleed between tasks. [cite: 32, 173]
-
-    * **Goal:** Implement robust agent task cancellation. Ensure STOP button is fully functional and UI task switching correctly cancels the previous task. [cite: 33, 34, 35, 66, 175]
-
-    * **Effort:** ~7/10 (Backend: 6, Frontend: 4)
-
-    * **Time Est.:** ~9-12 hours
-
-2\.  **HIGH: BUG - ARTIFACT VIEWER REFRESH:**
-
-    * **Issue:** Artifact viewer does not consistently or immediately auto-update after file writes mid-plan. [cite: 37, 176, 279]
-
-    * **Goal:** Ensure reliable and immediate auto-update. [cite: 67]
-
-    * **Effort:** ~4/10 (Backend: 3, Frontend: 3)
-
-    * **Time Est.:** ~4-6 hours
-
-3\.  **HIGH: AGENT CAPABILITIES - Robust Step Evaluation & Basic Retry:**
-
-    * **Issue:** Evaluator needs to reliably assess step success (content vs. description of it). [cite: 177, 280] Retry mechanism should effectively use evaluator feedback. [cite: 68, 178, 281]
-
-    * **Goal:** Ensure PCEE loop's Evaluator is robust and retry mechanism is effective.
-
-    * **Effort:** ~7/10 (Backend LLM prompting & agent flow logic)
-
-    * **Time Est.:** ~8-12 hours
-
-4\.  **HIGH: DEV OPS / STABILITY - Comprehensive Testing:**
-
-    * **Goal:** Expand unit and integration tests for critical backend (cancellation, agent lifecycle, all tools) and frontend components. [cite: 68, 179, 283]
-
-    * **Effort:** ~6/10 (Initial batch)
-
-    * **Time Est.:** ~10-15 hours (Initial batch)
-
-5\.  **MEDIUM: Make Tavily Search Optional:**
-
-    * **Goal:** Add a configuration option to disable Tavily search for privacy reasons. Inform the user about potential impacts on answer accuracy.
-
-    * **Effort:** ~5/10 (Backend: 3, Frontend: 2)
-
-    * **Time Est.:** ~3-5 hours
-
-6\.  **MEDIUM: UI/UX - Finalize "View [artifact] in Artifacts" Links:** [cite: 72, 182, 293]
-
-    * **Goal:** Implement full functionality for links within chat (e.g., from tool outputs) to directly open/highlight the mentioned artifact in the Artifact Viewer.
-
-    * **Effort:** ~3/10
-
-    * **Time Est.:** ~2-3 hours
-
-7\.  **MEDIUM: "Plug and Play" Tool System Enhancements:** [cite: 180]
-
-    * **Formalize Tool Input/Output Schemas:** Transition `input_schema_description` in `tool_config.json` to formal JSON Schemas (leveraging Pydantic `args_schema` from tool classes). [cite: 71, 181, 287]
-
-        * **Effort:** ~5/10
-
-        * **Time Est.:** ~4-6 hours
-
-    * **Develop New Tool Integration Guide:** Create comprehensive documentation and templates for adding new tools to the system. [cite: 71, 181, 288]
-
-        * **Effort:** ~4/10
-
-        * **Time Est.:** ~3-5 hours
-
-8\.  **MEDIUM: UI/UX - Artifact Viewer - Folder Link/View (Simple Version):**
-
-    * **Goal:** Enhance artifact viewer to provide links to open the task workspace folder or a simple list of folder contents.
-
-    * **Effort:** ~2/10 (for simple link/listing)
-
-    * **Time Est.:** ~2-3 hours
-
-9\.  **LOW: UI BUG - Copy button placement for simple messages:**
-
-    * **Issue:** Copy button is sometimes centered in the chat UI after a simple message instead of being next to the chat bubble.
-
-    * **Goal:** Adjust CSS/JS for correct placement.
-
-    * **Effort:** ~2/10
-
-    * **Time Est.:** ~1-2 hours
-
-10\. **LOW: UI/UX POLISH & DEBUGGING (as previously listed, e.g., Monitor Log Color-Coding, Plan File Status Update Warnings, "agent-thinking-status" line, agent step announcement styling).** [cite: 38, 39, 40, 41, 42, 43, 72]
-
-    * Review and refine the behavior and appearance of the global "agent-thinking-status" line. [cite: 38] (Effort: 2, Time: 1-2h)
-
-    * Consider if further styling (e.g., boxing, copy button) is needed for agent step announcements. [cite: 39] (Effort: 2, Time: 1-2h)
-
-    * WARNING: PLAN FILE STATUS UPDATE: Investigate and fix backend warnings about not finding step patterns. [cite: 41] (Effort: 3, Time: 2h)
-
-    * REVIEW: "UNKNOWN" HISTORY MESSAGE TYPES: Confirm handling of any remaining internal DB message types. [cite: 42] (Effort: 1, Time: 1h)
-
-    * DEBUG: Monitor Log Color-Coding: Verify/implement CSS for log differentiation. [cite: 43] (Effort: 1, Time: 1-2h)
-
-## Future Brainstorming / More Complex Enhancements (Post V1.0 Go-Live & Tool Refactor)
-
-### SHOULD HAVE (Important for V1.x releases):
-
-(Content largely same as previous full README: Enhanced Agent Capabilities, Multi-Tasking, Advanced UITL) [cite: 183, 184]
-
-### NICE TO HAVE (Valuable additions for future iterations):
-
-1\.  **Advanced Agent Reasoning & Self-Correction (Full).** [cite: 185, 294]
-
-2\.  **Comprehensive Tool Ecosystem Expansion (Leveraging new "Plug and Play" system):** [cite: 74, 185, 295]
-
-    * **Rscript Execution Tool:** (Effort: ~6/10, Time Est.: ~8-12h) [cite: 73, 295]
-
-    * **Data_Comparator:** Comparing datasets, files, or structured information. (Effort: ~5/10, Time Est.: ~6-10h)
-
-    * **Data_Compiler:** Aggregating data from multiple sources into a unified format. (Effort: ~6/10, Time Est.: ~8-12h)
-
-    * **Data_Filter:** Applying complex, user-defined filters to structured data. (Effort: ~5/10, Time Est.: ~6-10h)
-
-    * **Data_Formatter:** Converting data between various structured formats. (Effort: ~4/10, Time Est.: ~4-8h)
-
-    * **Domain_Analysis (e.g., InterProScan wrapper):** Specialized bioinformatics tool. (Effort: ~7/10, Time Est.: ~10-15h)
-
-    * **Information_Extractor (schema-based):** Robust information extraction against a user-defined schema. (Effort: ~7/10, Time Est.: ~10-15h)
-
-    * **Keyword_Extractor:** Dedicated tool for extracting relevant keywords/keyphrases. (Effort: ~4/10, Time Est.: ~4-6h)
-
-    * **Knowledge_Lookup:** Querying a structured knowledge base. (Effort: ~6/10, Time Est.: ~8-12h)
-
-    * **Report_Generator (general, structured):** More configurable and structured report generation. (Effort: ~8/10, Time Est.: ~12-20h)
-
-    * **Sequence_Search (e.g., BLAST wrapper):** Specialized bioinformatics tool. (Effort: ~7/10, Time Est.: ~10-15h)
-
-    * **Specialized_DB_Search (ClinVar, dbSNP, KEGG, etc.):** Wrappers for various bioinformatics databases. (Effort: ~7/10 per DB, Time Est.: ~10-15h per DB)
-
-    * **Text_Summarizer (standalone):** General-purpose tool with more control. (Effort: ~4/10, Time Est.: ~4-8h)
-
-    * **Text_Synthesizer (standalone):** General-purpose text synthesis tool. (Effort: ~5/10, Time Est.: ~6-10h)
-
-    * Enhanced PDF Parsing. [cite: 296]
-
-    * Further tools for literature review, data analysis/visualization, specialized bioinformatics tasks, document preparation. [cite: 74, 296]
-
-3\.  **UI/UX & Workspace Enhancements:** [cite: 75, 186, 297]
-
-    * Integrated Folder Viewer (complex version of folder link/view). [cite: 75, 186]
-
-    * Dedicated Steps Panel, etc. [cite: 75, 186]
-
-4\.  **Backend & Architecture (Scalability, Personas).** [cite: 75, 186, 297]
-
-5\.  **Deployment & DevOps.** [cite: 76, 187, 297]
-
-## Known Good States / Checkpoints
-
--   **"Plug and Play" Tool System:** Core architecture implemented and stable. All 9 tools dynamically loaded via `tool_config.json` and operational (pending full verification of `deep_research_synthesizer` after Pydantic fix). [cite: 76, 77, 156, 161, 299, 300]
-
--   **Pydantic v2 Migration:** Largely complete for models in tools and agent components. [cite: 77, 162, 163, 164, 272, 273, 274, 300, 301]
-
--   Token Counting: Working. [cite: 78, 171, 226]
-
--   File Upload: Functional. [cite: 78, 171, 227]
-
--   In-Chat Tool Feedback & Plan Proposal UI: Complete and refined. [cite: 79, 171, 221]
-
-## Open Questions / Areas for Investigation / Architectural Considerations
-
--   Robustness of `asyncio.Task.cancel()` for deep LLM/tool calls (STOP button issue). [cite: 80]
-
--   Best practices for `JsonOutputParser` when `pydantic_object` is specified (handled, but good to keep in mind). [cite: 81]
-
--   **New Tool Integration Process:** Documenting and streamlining the process for adding new tools now that the foundation is laid. [cite: 83]
-=======
-# BRAINSTORM.md - ResearchAgent Project (v2.0.0 Target & Beyond)
-
-This document tracks the current workflow, user feedback, and immediate brainstorming ideas for the ResearchAgent project.
-Current Version & State (Targeting v2.0.0 Foundational Fixes):
-
-Recent key advancements and fixes:
-
-  - Core Agent Logic & Tool Integration (Improved).
-  - Chat UI/UX Refinement (Significant Progress):
-      - **Visual Design & Readability:** Achieved consistent sub-step indentation, adjusted message bubble widths (User/RA/Plan ~60% fit-to-content, Sub-steps ~40%, Step titles ~60% with wrap). Agent Avatar for final RA messages. Blue line removed from RA/Plan messages. General UI and Token area font sizes increased. Role LLM selectors styled with color indicators.
-      - **Interactivity:** Collapsible major agent steps and tool outputs (via label click).
-      - **Persistence & Consistency:** Confirmed plans loaded from history render consistently.
-      - **Bug Fixes:** `read_file` tool output displays correctly and is nested. Chat scroll jump on bubble expand/collapse fixed. Plan persistence in chat now works. Final synthesized answer from agent correctly displayed.
-  - Plan Proposal UI & Persistence (COMPLETE).
-  - Token Counter UI & Functionality (FIXED & ENHANCED).
-  - File Upload Functionality (FIXED).
-  - Enhanced In-Chat Tool Feedback & Usability (Core Implemented & Refined).
-
-Immediate Focus & User Feedback / Known Issues / Proposed Enhancements:
-
-1.  **BUG & RE-ENGINEERING - Agent Task Cancellation & STOP Button (NEW HIGH PRIORITY):**
-    * **Observation:** Switching UI tasks does not reliably stop the agent processing the previous task; its status updates can bleed into the new task view. The STOP button is currently not effective.
-    * **Short-Term Goal (v2.0.0 fix):** Ensure that when a context switch *occurs in the UI*, the backend *robustly cancels* the agent task associated with the *previous* UI context. Make the STOP button fully functional to terminate the currently designated active agent task.
-    * **Challenge:** Requires careful management of asyncio tasks on the backend and ensuring cancellation propagates effectively.
-
-2.  **BUG - ARTIFACT VIEWER REFRESH (Medium Priority - Debugging Resumes):** (Details as before)
-
-3.  **UI/UX POLISH (Low Priority for v2.0.0 - Post Critical Fixes):**
-    * **A. Chat Message Visuals & Density:** Largely Addressed. Minor review of vertical spacing if needed.
-    * **B. Button Placement & Consistency:** Largely Addressed.
-    * **C. Monitor Log Readability:** (Details as before - Pending)
-    * **D. "Agent Thinking Status" Line Review:** (Details as before - Pending)
-    * **E. "View in Artifacts" Link for Tool Outputs (Pending):** (Details as before)
-    * **F. Agent Step Announcement Styling (Pending):** (Details as before)
-
-4.  **WARNING - PLAN FILE STATUS UPDATE (Low Priority):** (Details as before)
-5.  **REVIEW - "UNKNOWN" HISTORY MESSAGE TYPES (Low Priority - Mostly Addressed):** (Details as before)
-
-Future Brainstorming / More Complex Enhancements (Post v2.0.0):
-
-* **Advanced Multi-Tasking Agent Behavior (User Request):**
-    * **Goal:** Allow an agent plan (Task A) to continue running in the background if the user switches the UI to view another task (Task B).
-    * **Implications/Requirements:**
-
-* **Advanced Chat Information Management (Future):** (Details as before)
-* **Ongoing Planner & Executor Prompt Engineering:** (Details as before)
-
-Chat UI Simulation Details (Target: `simulation_option6.html` - Achieved Visually as a Base, with further enhancements):
- (No changes to this section)
+This document tracks user feedback, and brainstorming ideas for the ResearchAgent project.
+## Current Version & State (Targeting V1.0 Go-Live - Embarking on LangGraph Migration)
+
+**Recent Key Advancements (Prior to LangGraph Decision):**
+* "Plug and Play" Tool System: Dynamic tool loading via `tool_config.json` achieved.
+* Pydantic v2 Migration: Largely completed for core data models and tool arguments.
+* UI/UX Enhancements: Significant improvements to chat, plan proposal, token tracking, file uploads.
+
+**Current Strategic Pivot:**
+* **Migrating to LangGraph:** The project is shifting its core agent architecture from a LangChain `AgentExecutor`-based model to **LangGraph**.
+* **Rationale:** To gain more explicit control over the agent's execution flow, improve state management, enable more robust and responsive task interruption/cancellation, and lay a better foundation for future concurrent task processing (e.g., background tasks).
+
+## Immediate Focus: LangGraph Migration & Core Functionality Refoundation
+
+1.  **CRITICAL: LangGraph Migration - PCEE Workflow Implementation:**
+    * **Goal:** Re-implement the core Plan-Code-Execute-Evaluate (PCEE) loop as a stateful graph using LangGraph.
+        * Define a clear state schema (likely Pydantic model or TypedDict).
+        * Adapt existing components (Intent Classifier, Planner, Controller, Executor logic, Evaluators) to function as nodes within the graph.
+        * Implement conditional edges for routing based on state (e.g., intent, step success, retry needed).
+    * **Effort & Time Est.:** Significant, forming the bulk of the current development cycle.
+
+2.  **CRITICAL: Robust Task Interruption & Cancellation (within LangGraph):**
+    * **Goal:** Ensure that STOP signals from the UI and implicit cancellations (e.g., task switching) can reliably and promptly interrupt the execution of a LangGraph instance.
+    * **Approach:**
+        * Manage the `asyncio.Task` running the LangGraph execution.
+        * Utilize LangGraph's `interrupt` features if applicable between node transitions.
+        * Explore passing `asyncio.Event` or similar signals into graph execution for more granular checks within nodes or long-running tools (if tools are refactored to accept them).
+        * Ensure `asyncio.CancelledError` is handled gracefully throughout the graph execution.
+    * **Effort & Time Est.:** High (intertwined with migration).
+
+3.  **HIGH: Re-Verification of Core Features on LangGraph:**
+    * **Tool Integration:** Ensure the "Plug and Play" tool system (`tool_config.json`, `tool_loader.py`) integrates smoothly with LangGraph nodes.
+    * **State Persistence (Checkpointing):** Implement and leverage LangGraph's checkpointing for saving and resuming graph state, which is crucial for long-running tasks and future backgrounding.
+    * **LLM Integration:** Confirm seamless operation with Gemini and Ollama via LangChain LLM wrappers within graph nodes.
+    * **UI Feedback:** Ensure LangGraph's streaming capabilities (e.g., `astream_events`) are used to provide rich, real-time updates to the WebSocket UI (step status, thoughts, tool calls, final answers).
+    * **Artifact Viewer Refresh:** Re-integrate or re-design the mechanism for triggering artifact viewer updates based on graph events or state changes indicating file writes.
+    * **Step Evaluation & Retry Logic:** Implement the retry loop for plan steps as part of the graph's conditional logic, guided by the Step Evaluator node.
+    * **Token Usage Tracking:** Adapt callback handlers to correctly track token usage from LLM calls made within graph nodes.
+
+4.  **HIGH: Comprehensive Testing of the New LangGraph Architecture.**
+
+## Future Brainstorming / Enhanced Capabilities (Post-LangGraph Stability)
+
+**Leveraging LangGraph's Strengths:**
+
+1.  **True Asynchronous Background Task Processing:**
+    * With robust state management and checkpointing in LangGraph, implement the ability for a user to switch tasks, allowing the previous agent's graph execution to continue in the background (up to a defined limit, e.g., one background task).
+    * Requires UI indicators for background tasks and robust message filtering in the frontend.
+
+2.  **More Complex Agentic Behaviors:**
+    * **Advanced Self-Correction Loops:** LangGraph's cyclical nature is ideal for more sophisticated self-correction where the agent can loop back to earlier stages (e.g., re-plan, re-validate) based on evaluation.
+    * **Multi-Actor Agents:** Explore scenarios where different specialized LangGraph agents (or sub-graphs) collaborate.
+    * **Persistent Agent State / Memory:** Use checkpointing to allow agents to "remember" their state across user sessions or server restarts for specific long-running research tasks.
+
+3.  **Sophisticated Human-in-the-Loop (HITL) Workflows:**
+    * Beyond plan confirmation, use LangGraph's interrupt feature to explicitly request human input or approval at critical junctures within a plan's execution.
+
+4.  **Comprehensive Tool Ecosystem Expansion:**
+    * The more robust state and flow control of LangGraph should make integrating and managing a wider array of complex tools more feasible. All previously listed tools (Rscript, Data Analysis, Bioinformatics specific) remain relevant here.
+
+5.  **UI/UX & Workspace Enhancements:**
+    * Develop a more visual representation of the LangGraph's execution progress in the UI.
+    * Integrated Folder Viewer.
+
+## Open Questions / Areas for Investigation with LangGraph
+
+* **Optimal Granularity for Graph Nodes:** How finely should the PCEE loop be broken down into LangGraph nodes for the best balance of control, observability, and complexity?
+* **Error Handling and Resilience within Graph Edges:** Best practices for defining conditional edges that handle unexpected errors or tool failures gracefully.
+* **Performance/Latency:** Monitor the performance of LangGraph execution, especially with checkpointing enabled.
+* **Cancellation Signal Propagation:** Deepest level of cancellation achievable within LangGraph nodes that make external calls (e.g., how to best make tools themselves truly cancellable if they involve long, uninterruptible SDK calls).
+* **Managing State for Concurrent Sessions:** If multiple users are active, how to ensure clean isolation and efficient management of their respective LangGraph instances and checkpoints.
+
+This shift to LangGraph is a significant architectural decision aimed at building a more robust, controllable, and future-proof ResearchAgent.

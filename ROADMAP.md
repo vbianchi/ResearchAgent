@@ -1,281 +1,78 @@
-# ResearchAgent: Project Roadmap (V1.0 Go-Live Target & Beyond)
+# ResearchAgent: Project Roadmap (Targeting LangGraph Architecture)
 
-This document outlines the planned development path for the ResearchAgent project. [cite: 257] It is a living document and will be updated as the project evolves. [cite: 258]
+This document outlines the planned development path for the ResearchAgent project, reflecting a strategic shift towards using LangGraph for core agent orchestration.
 
 ## Guiding Principles for Development
-
--   **User-Centricity:** Prioritize features and fixes that directly improve the user's ability to conduct research efficiently and effectively. [cite: 259]
-
--   **Stability & Reliability:** Ensure the core system is robust before adding complex new features. [cite: 260]
-
--   **Modularity:** Design components that are as independent as possible to facilitate easier development, testing, and maintenance. [cite: 261]
-
--   **Iterative Improvement:** Release updates incrementally, gathering feedback and refining features along the way. [cite: 262]
-
-## Phase 1: Core Functionality, Initial UI & Foundational Tool System (Completed)
-
--   Basic three-panel UI structure (Tasks, Chat, Monitor/Artifacts). [cite: 263]
-
--   WebSocket communication for real-time updates. [cite: 263]
-
--   Task creation, selection, deletion, renaming, and basic persistent history via SQLite. [cite: 264]
-
--   Initial agent flow (Intent Classification, Planning, Execution, Evaluation - PCEE). [cite: 265]
-
--   Basic tool integration. [cite: 265]
-
--   Role-specific LLM configurations. [cite: 265]
-
--   Significant UI/UX improvements (collapsible steps, agent avatars, improved font sizes, LLM selector styling, dark theme refinements), fixes for `read_file` tool output, implementation of Token Counter, File Upload, and enhanced In-Chat Tool Feedback. [cite: 266]
-
--   **Architectural Refactor: "Plug and Play" Tool System (COMPLETE & STABLE):** [cite: 267]
-
-    -   Implemented a dynamic tool loading mechanism using `tool_config.json`. [cite: 268]
-
-    -   `tool_loader.py` parses the config and instantiates tools. [cite: 269]
-
-    -   All 9 tools dynamically loaded and operational. [cite: 270, 161, 300]
-
-    -   Scalable foundation for future tool development. [cite: 271]
-
--   **Pydantic v2 Migration (Largely Completed):** [cite: 272]
-
-    -   Migrated most Pydantic models for Tool Argument Schemas and LLM Output Schemas to v2. [cite: 273, 274, 163]
-
-    -   Resolved associated Pydantic v2 strictness issues. [cite: 275]
-
-    -   `deep_research_tool.py` Pydantic model validator updated.
-
-## Phase 2: V1.0 Go-Live (Target: Within 2 Months - MUST HAVE Focus) [cite: 277]
-
-This phase focuses on delivering a stable, reliable, and core-efficient ResearchAgent.
-
-1\.  **CRITICAL: Agent Task Cancellation & STOP Button:** [cite: 278]
-
-    * **Goal:** Ensure agent tasks are reliably cancelled (via STOP button or context switch). Make STOP button fully functional. [cite: 34, 35, 66, 175, 278]
-
-    * **Effort:** ~7/10
-
-    * **Time Est.:** ~9-12 hours
-
-2\.  **HIGH: BUG - ARTIFACT VIEWER REFRESH:** [cite: 279]
-
-    * **Goal:** Ensure reliable auto-update of the artifact viewer after file writes. [cite: 37, 67, 176]
-
-    * **Effort:** ~4/10
-
-    * **Time Est.:** ~4-6 hours
-
-3\.  **HIGH: AGENT CAPABILITIES - Robust Step Evaluation & Basic Retry:** [cite: 280]
-
-    * **Goal:** Ensure the PCEE loop's Evaluator component reliably assesses step success and retry mechanism is effective. [cite: 68, 177, 178, 281]
-
-    * **Effort:** ~7/10
-
-    * **Time Est.:** ~8-12 hours
-
-4\.  **HIGH: DEV OPS / STABILITY - Comprehensive Testing:** [cite: 283]
-
-    * **Goal:** Expand unit and integration tests for critical backend and frontend components. [cite: 68, 179]
-
-    * **Effort:** ~6/10 (Initial batch)
-
-    * **Time Est.:** ~10-15 hours (Initial batch)
-
-## Phase 3: V1.x Enhancements (Post Go-Live - SHOULD HAVE Focus) [cite: 284]
-
-This phase aims to enhance the agent's capabilities, user control, and overall experience.
-
-1\.  **Make Tavily Search Optional:**
-
-    * **Goal:** Add configuration to disable Tavily search for privacy, with user notification.
-
-    * **Effort:** ~5/10
-
-    * **Time Est.:** ~3-5 hours
-
-2\.  **UI/UX: Finalize "View [artifact] in Artifacts" Links:** [cite: 293]
-
-    * **Goal:** Fully implement links from chat to artifacts in the viewer. [cite: 72, 182]
-
-    * **Effort:** ~3/10
-
-    * **Time Est.:** ~2-3 hours
-
-3\.  **"Plug and Play" Tool System Enhancements:** [cite: 286]
-
-    * **Formalize Tool Input/Output Schemas:** Transition `input_schema_description` to formal JSON Schemas. [cite: 287, 71, 181]
-
-        * **Effort:** ~5/10
-
-        * **Time Est.:** ~4-6 hours
-
-    * **Develop New Tool Integration Guide:** Create documentation and templates for adding new tools. [cite: 288, 71, 181]
-
-        * **Effort:** ~4/10
-
-        * **Time Est.:** ~3-5 hours
-
-4\.  **UI/UX: Artifact Viewer - Folder Link/View (Simple Version):**
-
-    * **Goal:** Provide links to task workspace folders or a simple list of contents.
-
-    * **Effort:** ~2/10
-
-    * **Time Est.:** ~2-3 hours
-
-5\.  **Enhanced Agent Capabilities & Efficiency (from previous roadmap):** [cite: 289]
-
-    * Improved Agent Memory / Workspace RAG (Basic). [cite: 289]
-
-    * Streaming LLM Responses (Final Answers). [cite: 290]
-
-    * Refined Error Parsing & Reporting. [cite: 290]
-
-    * Robust Asynchronous Task Cancellation (Advanced - may be partially covered by Phase 2). [cite: 290, 183]
-
-6\.  **Multi-Tasking & User Control (from previous roadmap):** [cite: 291]
-
-    * Asynchronous Background Task Processing (Basic Stop/Switch). [cite: 291, 44]
-
-    * Optional Tools (via `tool_config.json` `enabled` flag or UI - Tavily optionality is a start). [cite: 292, 183]
-
-7\.  **Advanced User-in-the-Loop (UITL/HITL) Capabilities.** [cite: 293, 184]
-
-8\.  **Low Priority Bug Fixes & UI Polish:**
-
-    * UI BUG: Copy button placement for simple messages. (Effort: 2, Time: 1-2h)
-
-    * UI/UX POLISH: Global "agent-thinking-status" line behavior. (Effort: 2, Time: 1-2h) [cite: 38]
-
-    * UI/UX POLISH: Styling for agent step announcements. (Effort: 2, Time: 1-2h) [cite: 39]
-
-    * WARNING: PLAN FILE STATUS UPDATE: Fix warnings about not finding step patterns. (Effort: 3, Time: 2h) [cite: 41]
-
-    * REVIEW: "UNKNOWN" HISTORY MESSAGE TYPES: Confirm handling. (Effort: 1, Time: 1h) [cite: 42]
-
-    * DEBUG: Monitor Log Color-Coding: Verify/implement CSS. (Effort: 1, Time: 1-2h) [cite: 43]
-
-## Phase 4: Future Iterations (NICE TO HAVE Focus) [cite: 294]
-
-This phase will focus on adding more advanced features, expanding the tool ecosystem, and further polishing the UI/UX.
-
-1\.  **Advanced Agent Reasoning & Self-Correction (Full).** [cite: 294, 185]
-
-2\.  **Comprehensive Tool Ecosystem Expansion (Leveraging "Plug and Play"):** [cite: 295, 185]
-
-    * **Rscript Execution Tool:** (Effort: ~6/10, Time Est.: ~8-12h) [cite: 73, 295]
-
-    * **Data_Comparator:** (Effort: ~5/10, Time Est.: ~6-10h)
-
-    * **Data_Compiler:** (Effort: ~6/10, Time Est.: ~8-12h)
-
-    * **Data_Filter:** (Effort: ~5/10, Time Est.: ~6-10h)
-
-    * **Data_Formatter:** (Effort: ~4/10, Time Est.: ~4-8h)
-
-    * **Domain_Analysis (e.g., InterProScan wrapper):** (Effort: ~7/10, Time Est.: ~10-15h)
-
-    * **Information_Extractor (schema-based):** (Effort: ~7/10, Time Est.: ~10-15h)
-
-    * **Keyword_Extractor:** (Effort: ~4/10, Time Est.: ~4-6h)
-
-    * **Knowledge_Lookup:** (Effort: ~6/10, Time Est.: ~8-12h)
-
-    * **Report_Generator (general, structured):** (Effort: ~8/10, Time Est.: ~12-20h)
-
-    * **Sequence_Search (e.g., BLAST wrapper):** (Effort: ~7/10, Time Est.: ~10-15h)
-
-    * **Specialized_DB_Search (ClinVar, dbSNP, KEGG, etc.):** (Effort: ~7/10 per DB, Time Est.: ~10-15h per DB)
-
-    * **Text_Summarizer (standalone):** (Effort: ~4/10, Time Est.: ~4-8h)
-
-    * **Text_Synthesizer (standalone):** (Effort: ~5/10, Time Est.: ~6-10h)
-
-    * Enhanced PDF Parsing. [cite: 296]
-
-    * More bioinformatics tools, data analysis/visualization tools, document preparation tools. [cite: 296, 74]
-
-3\.  **UI/UX & Workspace Enhancements (Folder Viewer, Dedicated Steps Panel, etc.).** [cite: 297, 186, 75]
-
-4\.  **Backend & Architecture (Scalability, Personas).** [cite: 297, 186, 75]
-
-5\.  **Deployment & DevOps.** [cite: 297, 187, 76]
+-   **Robustness & Control:** Prioritize architectures that offer explicit state management and reliable task lifecycle control.
+-   **User-Centricity:** Ensure features improve research efficiency and user experience.
+-   **Modularity & Maintainability:** Design for ease of development, testing, and future expansion.
+-   **Iterative Improvement:** Incrementally build and refine, gathering feedback.
+
+## Phase 1: Initial LangChain-based Implementation & Learnings (Completed)
+-   Developed a foundational UI and backend with a PCEE agent workflow using LangChain's `AgentExecutor`.
+-   Implemented dynamic tool loading, Pydantic v2 migration for several models, and significant UI/UX enhancements.
+-   **Key Learning:** Encountered challenges with reliable and prompt task interruption/cancellation, highlighting the need for an architecture with more explicit control over asynchronous operations and state. This learning directly informs the strategy for Phase 2.
+
+## Phase 2: LangGraph Migration & Core Stability (Current Focus - V1.0 Go-Live Target)
+This phase is dedicated to migrating the core agent logic to LangGraph to build a more robust and controllable foundation.
+
+1.  **CRITICAL: Migrate PCEE Workflow to LangGraph:**
+    * **Description:** Redesign and implement the Intent Classifier, Planner, Controller, Executor (ReAct-style logic), and Evaluators (Step & Overall) as a stateful graph in LangGraph.
+    * Define a clear state schema for the graph.
+    * Adapt existing Pydantic models for compatibility with LangGraph state.
+    * **Goal:** A fully functional PCEE loop running on LangGraph.
+
+2.  **CRITICAL: Implement Robust Task Interruption & Cancellation:**
+    * **Description:** Leverage LangGraph's interrupt mechanisms and `asyncio` task management to ensure STOP signals (from UI) and context switches reliably and promptly terminate or pause graph executions.
+    * **Goal:** User-perceivable responsiveness to STOP commands; clean termination of tasks.
+
+3.  **HIGH: Re-validate and Integrate Core Features on LangGraph:**
+    * **Tool System:** Ensure the "Plug and Play" tool loading and custom tool execution work seamlessly within LangGraph nodes.
+    * **State Management & Checkpointing:** Implement effective checkpointing for graph state to enable resilience and pave the way for pausable/resumable tasks.
+    * **UI Feedback:** Utilize LangGraph's streaming capabilities (e.g., `astream_events`) for detailed real-time updates to the WebSocket UI (status, thoughts, tool calls, logs).
+    * **Artifact Viewer:** Ensure artifact generation and viewer refresh are correctly triggered by graph events.
+    * **Token Usage:** Adapt callbacks to accurately track LLM token usage within the graph.
+
+4.  **HIGH: Comprehensive Testing of LangGraph Architecture:**
+    * **Description:** Develop unit and integration tests specifically for the LangGraph implementation, covering state transitions, node execution, error handling, and cancellation.
+    * **Goal:** A stable V1.0 release based on LangGraph.
+
+## Phase 3: V1.x Enhancements (Building on LangGraph Foundation)
+With a stable LangGraph core, this phase will focus on user-facing enhancements and leveraging the new architecture.
+
+1.  **SHOULD HAVE: Implement Basic Concurrent Task Processing:**
+    * **Description:** Allow one agent task (LangGraph execution) to run in the background while the user interacts with a new foreground task.
+    * **Leverages:** LangGraph's state checkpointing and explicit task management.
+    * **Goal:** Initial support for "one active + one background" task per session.
+
+2.  **SHOULD HAVE: UI/UX Polish & Feature Completion:**
+    * Finalize "View [artifact] in Artifacts" links.
+    * Refine global status indicators and thinking updates based on LangGraph streaming.
+    * Address lower-priority UI bugs (e.g., copy button placement).
+
+3.  **SHOULD HAVE: "Plug and Play" Tool System Finalization:**
+    * Complete formalization of Tool Input/Output Schemas (JSON Schemas from Pydantic).
+    * Finalize the New Tool Integration Guide for the LangGraph context.
+
+4.  **SHOULD HAVE: Make Tavily Search Optional (User Configuration).**
+
+5.  **SHOULD HAVE: Advanced User-in-the-Loop (UITL/HITL) Patterns:**
+    * Explore using LangGraph interrupts for more sophisticated human approval steps within complex plans.
+
+## Phase 4: Future Iterations (Advanced Capabilities & Ecosystem)
+Focus on expanding capabilities and toolset.
+
+1.  **NICE TO HAVE: Advanced Agent Reasoning & Self-Correction:**
+    * Utilize LangGraph's cyclical nature for more complex error handling and plan refinement loops.
+2.  **NICE TO HAVE: Comprehensive Tool Ecosystem Expansion:**
+    * Prioritize development of key tools: Rscript Execution, Data Analysis/Visualization tools, enhanced PDF/Document parsing, specialized Bioinformatics tools (e.g., BLAST wrappers, domain analysis, specific DB searches like ClinVar, KEGG).
+3.  **NICE TO HAVE: Advanced UI/UX & Workspace Enhancements:**
+    * Visual graph execution monitor.
+    * Integrated folder viewer for workspaces.
+4.  **NICE TO HAVE: Backend & Architecture (Scalability, Multi-User Personas).**
+5.  **NICE TO HAVE: Deployment & DevOps (Streamlined deployment options).**
 
 ## Phase 5: Advanced Agent Autonomy & Specialized Applications (Longer-Term)
+Explore more autonomous agent behaviors, long-term memory solutions, and potential cloud deployment scenarios.
 
-(Content remains the same as previous full README: Enhanced Agent Self-Correction, Long-Term Memory, Cloud Deployment, etc.)
-
-## Completed Milestones (Summary up to current state)
-
--   **v2.0-v2.4 (approx):** Initial architecture, core agent loop (PCEE), basic UI (3-panel), SQLite history, foundational tool integration, modular JS frontend, initial UI enhancements. [cite: 298]
-
--   **v2.5.0 - v2.5.2 (approx):** Significant UI/UX improvements, Token Counter, File Upload, In-Chat Tool Feedback, Plan Proposal UI. [cite: 299]
-
--   **v2.5.3 (Current Focus - In Progress):**
-
-    -   **"Plug and Play" Tool System Refactor (COMPLETE):** All 9 tools dynamically loaded via `tool_config.json`. [cite: 300, 161]
-
-    -   **Pydantic v2 Migration (Largely Complete):** Migrated models for tool arguments, intent classifier, planner, controller, and addressed `deep_research_tool.py` validator. [cite: 301, 164, 273, 274] `evaluator.py` models previously Pydantic v1, now assumed v2 or compatible.
-
-    -   Resolved numerous import and runtime errors related to tool loading and Pydantic integration. [cite: 302]
-
-    -   ReAct agent prompt improved for direct content output.
-
-    -   History handling for `monitor_user_input` warning resolved.
-
-    -   Ongoing: Critical bug fixes (Agent Task Cancellation, Artifact Viewer Refresh), Agent Capability enhancements (Step Evaluation/Retry), and comprehensive testing. [cite: 303]
-
-This roadmap will guide our development efforts. Feedback and adjustments are welcome as the project progresses. [cite: 304]
-=======
-# ResearchAgent: Project Roadmap (v2.0.0 Target & Beyond)
-
-This document outlines the planned development path for the ResearchAgent project. It is a living document and will be updated as the project evolves.
-
-## Guiding Principles for Development
-(Unchanged)
-
-## Phase 1: Core Stability & Foundational Tools (Largely Complete - Basis of v2.0.0)
-(Unchanged)
-
-## Phase 2: Enhanced Agent Capabilities & User Experience (Current & Near-Term Focus - Targeting v2.0.0)
-
-1.  Core Agent Execution Stability & Feature Verification (Improved)
-    -   (Unchanged)
-2.  Refine Chat UI/UX & Message Flow (Significant Progress - Critical Fixes Pending)
-    -   **Visual Design Goal (Achieved & Enhanced).**
-    -   **Persistence (Implemented & Refined):** All message types, including confirmed plans, saved/reloaded consistently.
-    -   **Key Features & Bug Fixes (v2.5.3 Development Cycle):**
-       -   **FIXED: Token Counter Per Agent & UI Enhanced.**
-        -   **FIXED: File Upload.**
-        -   **IMPLEMENTED & REFINED: Enhanced In-Chat Tool Feedback & Usability** (Collapsible tool outputs via label, `read_file` content display, copy buttons, etc.).
-        -   **ADDRESSED: Major UI/UX Polish Items:**
-           -   Chat Message Visuals & Density (Improved sub-step indentation, bubble widths, step title wrapping, collapsible major steps, agent avatar, font sizes, LLM selector styling).
-            -   Blue line removed from RA final answers and Plan Proposal blocks.
-        -   **FIXED: `read_file` Tool Output Visibility, Nesting, and Plan Persistence Visuals.**
-        -   **FIXED: Chat Scroll Behavior on expand/collapse.**
-        -   **NEW HIGH PRIORITY (v2.5.3 Target): Robust Agent Task Cancellation & STOP Button:**
-           * Ensure agent tasks are reliably cancelled when intended (e.g., via STOP button, or current design of context switch).
-            * Make STOP button fully functional.
-        -   **BUG (Medium Priority - Post Cancellation Fix): Artifact Viewer Refresh:** Ensure reliable auto-update.
-        -   **WARNING (Low Priority): Plan File Status Update.**
-        -   **REVIEW (Low Priority): "Unknown" History Message Types.**
-3.  DEBUG (Low Priority): Monitor Log Color-Coding. (Details as before)
-
-## Phase 3: Advanced Interactivity & Tooling (Mid-Term - Incorporating New Goals)
-
--   **ENHANCEMENT: Asynchronous Background Task Processing (Post v2.0.0):**
-    -   Allow agent plans to continue running if the user switches UI task context.
-    -   Implement UI indicators for actively running tasks in the task list.
-    -   Ensure correct rendering of non-active tasks and appropriate chat input locks.
-    -   Requires backend changes for task state management and message routing.
--   Advanced User-in-the-Loop (UITL/HITL) Capabilities.
--   New Tools & Tool Enhancements.
--   Workspace RAG.
--   Improved Agent Memory & Context Management.
--   Further Chat Information Management.
-
-## Phase 4: Advanced Agent Autonomy & Specialized Applications (Longer-Term)
-(Unchanged)
-
-This roadmap will guide our development efforts. Feedback and adjustments are welcome.
+This updated roadmap reflects the strategic decision to build upon LangGraph for a more robust and controllable ResearchAgent.
