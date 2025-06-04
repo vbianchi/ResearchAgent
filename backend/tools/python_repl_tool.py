@@ -1,94 +1,124 @@
 # backend/tools/python_repl_tool.py
-import logging
 import asyncio
-from typing import Optional, Type, Any # Added Any
+import logging
+from typing import Optional, Type, Any, Dict
 
 from langchain_core.tools import BaseTool, ToolException
 from langchain_core.callbacks import CallbackManagerForToolRun
-# <<< MODIFIED IMPORT: Using Pydantic v2 directly --- >>>
-from pydantic import BaseModel, Field
-# <<< --- END MODIFIED IMPORT --- >>>
-from langchain_experimental.utilities import PythonREPL
+# MODIFIED: Using pydantic.v1 for BaseModel and Field as per project context
+from pydantic.v1 import BaseModel, Field 
+
+try:
+    from langchain_experimental.utilities import PythonREPL
+except ImportError:
+    PythonREPL = None # type: ignore
+    logging.getLogger(__name__).warning(
+        "Could not import PythonREPL from langchain_experimental.utilities. "
+        "The PythonREPLTool will not be available."
+    )
 
 logger = logging.getLogger(__name__)
 
-# Attempt to initialize the PythonREPL utility once
-try:
-    python_repl_utility_instance = PythonREPL()
-    logger.info("PythonREPL utility instance created successfully for PythonREPLTool.")
-except ImportError:
-    logger.warning("Could not import PythonREPL from langchain_experimental.utilities. Python_REPL tool will not be available.")
-    python_repl_utility_instance = None
-except Exception as e:
-    logger.error(f"Error initializing PythonREPL utility: {e}", exc_info=True)
-    python_repl_utility_instance = None
-
-
-class PythonREPLInput(BaseModel): # <<< Now inherits from Pydantic v2 BaseModel
-    command: str = Field(description="A single, simple Python expression or a very short, self-contained snippet of Python code to execute.")
-    # No model_config needed for this simple model
+class PythonREPLInput(BaseModel):
+    command: str = Field(description="A valid Python command or multi-line script.")
 
 class PythonREPLTool(BaseTool):
+    """
+    A tool that executes Python code in a REPL environment.
+    Input should be a string containing the Python code to execute.
+    The tool will return the standard output (stdout) of the executed code.
+    If the code is an expression that has a non-None result, its string
+    representation might be returned if no stdout is produced (behavior
+    dependent on the underlying PythonREPL utility).
+    To ensure output, use `print()` statements in your code.
+    """
     name: str = "Python_REPL"
     description: str = (
-        "Executes a single, simple Python expression or a very short, self-contained snippet of Python code. "
-        "Input MUST be valid Python code that can be evaluated as a single block. "
-        "Use this for straightforward operations like basic arithmetic (e.g., '2 + 2', '10 / 5 * 2'), "
-        "simple string manipulations, or quick checks. "
-        "**DO NOT use this for defining multi-line functions or classes, complex scripts, file I/O, or installing packages.** "
-        "For writing and then running Python scripts, use the `write_file` tool followed by the `workspace_shell` "
-        "tool (e.g., 'python your_script_name.py'). "
-        "Output will be the result of the expression or `print()` statements. "
-        "**Security Note:** This executes code directly in the backend environment. Be extremely cautious."
+        "A Python REPL. Use this to execute python commands. "
+        "Input should be a valid python command. "
+        "If you want to see the output of a value, you should print it out "
+        "with `print(...)`. The tool returns what is printed to standard output."
     )
     args_schema: Type[BaseModel] = PythonREPLInput
+    
+    # _repl will be initialized as an instance attribute in __init__
+    # It is not a Pydantic field.
+
+    def __init__(self, **kwargs: Any):
+        super().__init__(**kwargs) 
+        
+        self._repl: Optional[PythonREPL] = None # Initialize as instance attribute
+        if PythonREPL is not None:
+            try:
+                self._repl = PythonREPL() 
+                logger.info(f"PythonREPLTool: Initialized self._repl. Type: {type(self._repl)}")
+            except Exception as e:
+                logger.error(f"Failed to initialize PythonREPL in PythonREPLTool: {e}", exc_info=True)
+                self._repl = None 
+        else:
+            logger.warning("PythonREPL utility not available. PythonREPLTool will not function.")
+
 
     def _run(
         self,
-        command: str, # Accepts the string directly
+        command: str,
         run_manager: Optional[CallbackManagerForToolRun] = None,
-        **kwargs: Any # <<< Any is now defined
     ) -> str:
-        logger.info(f"Tool '{self.name}' executing command: '{command}'")
-        if python_repl_utility_instance is None:
-            logger.error(f"Tool '{self.name}': PythonREPL utility not available.")
-            raise ToolException("PythonREPL utility is not available. Check server logs for import/init errors.")
-        if not isinstance(command, str) or not command.strip():
-            logger.error(f"Tool '{self.name}': Received invalid input. Expected a non-empty command string.")
-            raise ToolException("Invalid input. Expected a non-empty Python command string.")
+        """Use the tool."""
+        if self._repl is None:
+            msg = "PythonREPLTool is not available because the PythonREPL utility could not be initialized."
+            logger.error(msg)
+            raise ToolException(msg)
+            
+        logger.info(f"Tool '{self.name}' synchronously executing command (first 200 chars): '{command[:200]}'")
         try:
-            # PythonREPL.run is synchronous
-            result = python_repl_utility_instance.run(command)
-            logger.info(f"Tool '{self.name}' command executed. Output length: {len(result)}")
-            return result
+            result = self._repl.run(command)
+            output_str = str(result) if result is not None else ""
+            logger.info(f"Tool '{self.name}' sync command executed. Output length: {len(output_str)}")
+            return output_str
         except Exception as e:
-            logger.error(f"Tool '{self.name}': Error executing command '{command}': {e}", exc_info=True)
-            # Return the error message as a string, as REPL often does
-            return f"Error in Python REPL: {type(e).__name__}: {str(e)}"
+            logger.error(f"Error in PythonREPLTool _run for command '{command[:200]}': {e}", exc_info=True)
+            return f"Error executing Python REPL command: {type(e).__name__} - {str(e)}"
 
     async def _arun(
         self,
-        command: str, # Accepts the string directly
+        command: str,
         run_manager: Optional[CallbackManagerForToolRun] = None,
-        **kwargs: Any # <<< Any is now defined
     ) -> str:
-        logger.info(f"Tool '{self.name}' asynchronously executing command: '{command}'")
-        if python_repl_utility_instance is None:
-            logger.error(f"Tool '{self.name}': PythonREPL utility not available for async execution.")
-            raise ToolException("PythonREPL utility is not available. Check server logs for import/init errors.")
-        if not isinstance(command, str) or not command.strip():
-            logger.error(f"Tool '{self.name}': Received invalid input for async. Expected a non-empty command string.")
-            raise ToolException("Invalid input for async. Expected a non-empty Python command string.")
+        """Use the tool asynchronously."""
+        if self._repl is None:
+            msg = "PythonREPLTool is not available because the PythonREPL utility could not be initialized."
+            logger.error(msg)
+            raise ToolException(msg)
+
+        logger.info(f"Tool '{self.name}' asynchronously executing command (first 200 chars): '{command[:200]}'")
         try:
-            # Run the synchronous PythonREPL.run in a thread pool
-            loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(
-                None,  # Uses the default thread pool executor
-                python_repl_utility_instance.run,
-                command
-            )
-            logger.info(f"Tool '{self.name}' async command executed. Output length: {len(result)}")
-            return result
+            result = await asyncio.to_thread(self._repl.run, command)
+            output_str = str(result) if result is not None else ""
+            logger.info(f"Tool '{self.name}' async command executed. Output length: {len(output_str)}")
+            return output_str
         except Exception as e:
-            logger.error(f"Tool '{self.name}': Error executing async command '{command}': {e}", exc_info=True)
-            return f"Error in Python REPL (async): {type(e).__name__}: {str(e)}"
+            logger.error(f"Error in PythonREPLTool _arun for command '{command[:200]}': {e}", exc_info=True)
+            return f"Error executing Python REPL command asynchronously: {type(e).__name__} - {str(e)}"
+
+if __name__ == '__main__':
+    async def test_repl_tool():
+        logging.basicConfig(level=logging.INFO)
+        tool = PythonREPLTool()
+        if tool._repl is None: # Check the instance attribute
+            print("PythonREPLTool could not be initialized. Test skipped.")
+            return
+
+        commands_to_test = [
+            "print('Hello from REPL Tool')",
+            "x = 5\ny = 10\nprint(x+y)",
+            "1+1", 
+            "repr('Python is fun!')", 
+            "print(repr('Python is fun!'))" 
+        ]
+        for cmd in commands_to_test:
+            print(f"\nTesting command: {cmd}")
+            output = await tool.arun(command=cmd) # Pass command as a keyword argument
+            print(f"Output:\n>>>\n{output}\n<<<")
+
+    asyncio.run(test_repl_tool())

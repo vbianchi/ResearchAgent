@@ -1,31 +1,29 @@
-# backend/planner.py
 import logging
-from typing import List, Dict, Any, Tuple, Optional, Union
-
-from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
-from pydantic import BaseModel, Field, ValidationError # Ensure Pydantic v2
-from langchain_core.runnables import RunnableConfig
-from langchain_core.callbacks.base import BaseCallbackHandler, BaseCallbackManager
-import asyncio
+from typing import List, Dict, Any, Tuple, Optional
 
 from backend.config import settings
 from backend.llm_setup import get_llm
-from backend.callbacks import LOG_SOURCE_PLANNER
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
+from langchain_core.pydantic_v1 import BaseModel, Field # Ensure Pydantic v1 for Langchain compatibility
+import asyncio
 
 logger = logging.getLogger(__name__)
 
+# Define the structure for a single step in the plan
 class PlanStep(BaseModel):
     step_id: int = Field(description="A unique sequential identifier for this step, starting from 1.")
     description: str = Field(description="A concise, human-readable description of what this single sub-task aims to achieve.")
-    tool_to_use: Optional[str] = Field(default=None, description="The exact name of the tool to be used for this step, if any. Must be one of the available tools or 'None'.")
-    tool_input_instructions: Optional[str] = Field(default=None, description="Specific instructions or key parameters for the tool_input, if a tool is used. This is not the full tool input itself, but guidance for forming it.")
-    expected_outcome: str = Field(description="What is the expected result or artifact from completing this step successfully? For generative 'No Tool' steps, this should describe the actual content to be produced (e.g., 'The text of a short poem about stars.'). For tool steps or producing data for subsequent steps, describe the state or data (e.g., 'File 'data.csv' downloaded.', 'The full text of 'report.txt' is available.').")
+    tool_to_use: Optional[str] = Field(description="The exact name of the tool to be used for this step, if any. Must be one of the available tools or 'None'.")
+    tool_input_instructions: Optional[str] = Field(description="Specific instructions or key parameters for the tool_input, if a tool is used. This is not the full tool input itself, but guidance for forming it.")
+    expected_outcome: str = Field(description="What is the expected result or artifact from completing this step successfully? For generative 'No Tool' steps, this should describe the actual content to be produced (e.g., 'The text of a short poem about stars.'). For tool steps or steps producing data for subsequent steps, describe the state or data (e.g., 'File 'data.csv' downloaded.', 'The full text of 'report.txt' is available.').")
 
+# Define the structure for the overall plan
 class AgentPlan(BaseModel):
     human_readable_summary: str = Field(description="A brief, conversational summary of the overall plan for the user.")
     steps: List[PlanStep] = Field(description="A list of detailed steps to accomplish the user's request.")
+
 
 PLANNER_SYSTEM_PROMPT_TEMPLATE = """You are an expert planning assistant for a research agent.
 Your goal is to take a user's complex request and break it down into a sequence of logical, actionable sub-tasks.
@@ -50,12 +48,12 @@ For each sub-task in the plan:
     -   For tool steps or steps producing data primarily for *subsequent processing* within the plan (not direct user presentation yet): the `expected_outcome` should describe the state or data becoming available (e.g., "File 'data.csv' downloaded to workspace", "The full text content of the file 'report.txt' is returned and available for the next step", "The list of search results is available.").
     -   **Crucially, for "No Tool" steps that are intended to generate the final piece of information or creative content for that part of the plan, the `expected_outcome` MUST describe the actual content itself, as shown in point 3.**
 
-**Handling Multi-Part User Queries & Final Output Synthesis:**
-If the original user query explicitly or implicitly asks for multiple distinct pieces of information to be delivered, or involves the creation of files or multiple distinct outputs (e.g., "generate two poems and save them", "research X and write a report to report.txt"), ensure your plan includes all necessary steps to gather/generate each piece and perform any actions like file writing.
-**Crucially, after all individual pieces of information have been gathered/generated and actions (like file writing) have been performed by preceding steps, you MUST add a final "No Tool" step to synthesize these outcomes into a comprehensive final answer for the user.**
--   The `description` for this final synthesis step should clearly state its purpose, for example: "Synthesize all findings and actions into a final comprehensive answer for the user."
--   The `tool_input_instructions` (for this "No Tool" synthesis step) should guide the LLM on what prior step outputs and actions need to be confirmed and/or synthesized. For example: "Review the outcomes of all previous steps. If files were written (e.g., 'poem1.txt', 'analysis_report.pdf'), confirm their successful creation and briefly state their purpose or content. Combine this confirmation with any other generated information (e.g., search result summaries, direct answers from previous steps) into a single, coherent, and user-friendly response that fully addresses the original query: '{user_query}'. If the query asked for content to be generated and saved, you can optionally include a very brief snippet of the generated content in your final answer if it's concise and relevant."
--   The `expected_outcome` for this synthesis step MUST be: "A single, consolidated final answer that confirms all actions taken (like file creation) and presents all requested information, thereby fully addressing the user's original request, is generated."
+**Handling Multi-Part User Queries for Final Output:**
+If the original user query explicitly or implicitly asks for multiple distinct pieces of information to be delivered in the final response (e.g., "tell me X, and also provide Y"), ensure your plan includes all necessary steps to gather or generate each piece of information.
+**Crucially, after all individual pieces of information have been gathered by preceding steps and need to be presented to the user as a combined answer, you MUST add a final "No Tool" step.**
+-   The `description` for this final synthesis step should clearly state that it's combining the necessary prior outputs to fully address the user's original request.
+-   The `tool_input_instructions` (for this "No Tool" synthesis step) should guide the LLM on which prior step outputs need to be synthesized, for example: "Combine the result from Step X [e.g., the extracted fact] and the result from Step Y [e.g., the summary] into a complete answer to the user's original query: '{user_query}'".
+-   The `expected_outcome` for this synthesis step should be: "A single, consolidated final answer addressing all parts of the user's original request is generated."
 
 Additionally, provide a `human_readable_summary` of the entire plan that can be shown to the user for confirmation.
 Ensure the output is a JSON object that strictly adheres to the following JSON schema:
@@ -65,140 +63,127 @@ Do not include any preamble or explanation outside of the JSON object."""
 
 async def generate_plan(
     user_query: str,
-    available_tools_summary: str,
-    callback_handler: Union[List[BaseCallbackHandler], BaseCallbackManager, None] = None
-) -> Dict[str, Any]:
+    available_tools_summary: str
+) -> Tuple[Optional[str], Optional[List[Dict[str, Any]]]]:
+    """
+    Generates a multi-step plan based on the user query using an LLM.
+    Fetches its own LLM based on settings.
+    """
     logger.info(f"Planner: Generating plan for user query: {user_query[:100]}...")
-    if callback_handler:
-        logger.debug(f"Planner: Received callback_handler of type: {type(callback_handler)}")
 
     try:
         planner_llm: BaseChatModel = get_llm(
             settings,
             provider=settings.planner_provider,
             model_name=settings.planner_model_name,
-            requested_for_role=LOG_SOURCE_PLANNER,
-            callbacks=callback_handler
-        )
+            requested_for_role="Planner"
+        ) 
         logger.info(f"Planner: Using LLM {settings.planner_provider}::{settings.planner_model_name}")
     except Exception as e:
         logger.error(f"Planner: Failed to initialize LLM: {e}", exc_info=True)
-        return {
-            "plan_summary": None,
-            "plan_steps": None,
-            "plan_generation_error": f"LLM initialization failed: {e}"
-        }
+        return None, None
 
     parser = JsonOutputParser(pydantic_object=AgentPlan)
     format_instructions = parser.get_format_instructions()
 
     prompt_template = ChatPromptTemplate.from_messages([
         ("system", PLANNER_SYSTEM_PROMPT_TEMPLATE),
-        ("human", "{user_query}")
+        ("human", "{user_query}") 
     ])
 
     chain = prompt_template | planner_llm | parser
-    
-    invoke_payload = { # Defined here so it's available for error handling's raw output call
-        "user_query": user_query,
-        "available_tools_summary": available_tools_summary,
-        "format_instructions": format_instructions
-    }
-    run_config = RunnableConfig( # Defined here for the same reason
-        callbacks=callback_handler if isinstance(callback_handler, BaseCallbackManager) else ([callback_handler] if callback_handler else None),
-        metadata={"component_name": LOG_SOURCE_PLANNER}
-    )
 
     try:
-        # The parser is *supposed* to return the Pydantic object directly.
-        # Handle if it returns a dict instead.
-        parsed_llm_output = await chain.ainvoke(invoke_payload, config=run_config)
-        
-        agent_plan_model: AgentPlan
-        if isinstance(parsed_llm_output, AgentPlan):
-            agent_plan_model = parsed_llm_output
-        elif isinstance(parsed_llm_output, dict):
-            logger.debug("Planner: LLM output parser returned a dict, attempting to validate with Pydantic model AgentPlan.")
-            try:
-                agent_plan_model = AgentPlan(**parsed_llm_output)
-            except ValidationError as ve_plan:
-                logger.error(f"Planner: Pydantic validation failed for AgentPlan from LLM output dict: {ve_plan}. Raw dict: {parsed_llm_output}", exc_info=True)
-                raise # Re-raise to be caught by the outer try-except
+        logger.debug(f"Planner prompt input variables: {prompt_template.input_variables}")
+        planned_result_dict = await chain.ainvoke({
+            "user_query": user_query, 
+            "available_tools_summary": available_tools_summary,
+            "format_instructions": format_instructions
+        })
+
+        agent_plan: AgentPlan
+        if isinstance(planned_result_dict, AgentPlan):
+            agent_plan = planned_result_dict
+        elif isinstance(planned_result_dict, dict):
+            agent_plan = AgentPlan(**planned_result_dict)
         else:
-            logger.error(f"Planner: Unexpected output type from LLM parser chain: {type(parsed_llm_output)}. Output: {str(parsed_llm_output)[:500]}")
-            raise TypeError(f"Unexpected output type from LLM parser for AgentPlan: {type(parsed_llm_output)}")
-        
-        human_summary = agent_plan_model.human_readable_summary
-        structured_steps_dicts = [step.model_dump() for step in agent_plan_model.steps]
-        
-        for i, step_dict in enumerate(structured_steps_dicts):
-            step_dict['step_id'] = step_dict.get('step_id', i + 1)
+            logger.error(f"Planner LLM call returned an unexpected type: {type(planned_result_dict)}. Content: {planned_result_dict}")
+            try:
+                raw_output_chain = prompt_template | planner_llm | StrOutputParser()
+                raw_output = await raw_output_chain.ainvoke({
+                    "user_query": user_query,
+                    "available_tools_summary": available_tools_summary,
+                    "format_instructions": format_instructions
+                })
+                logger.error(f"Planner: Raw LLM output on parsing error: {raw_output}")
+            except Exception as raw_e:
+                logger.error(f"Planner: Failed to get raw LLM output on parsing error: {raw_e}")
+            return None, None
+
+        human_summary = agent_plan.human_readable_summary
+        structured_steps = []
+        for i, step_model in enumerate(agent_plan.steps):
+            step_dict = step_model.dict()
+            step_dict['step_id'] = i + 1 
+            structured_steps.append(step_dict)
+
 
         logger.info(f"Planner: Plan generated successfully. Summary: {human_summary}")
-        logger.debug(f"Planner: Structured plan (as dicts): {structured_steps_dicts}")
-        return {
-            "plan_summary": human_summary,
-            "plan_steps": structured_steps_dicts,
-            "plan_generation_error": None
-        }
+        logger.debug(f"Planner: Structured plan: {structured_steps}")
+        
+        # --- ADDED DEBUG LOGGING ---
+        logger.info(f"Planner (DEBUG): Returning human_summary (type: {type(human_summary)}): '{str(human_summary)[:200]}...'")
+        logger.info(f"Planner (DEBUG): Returning structured_steps (type: {type(structured_steps)}, length: {len(structured_steps) if isinstance(structured_steps, list) else 'N/A'}): '{str(structured_steps)[:200]}...'")
+        # --- END ADDED DEBUG LOGGING ---
+        
+        return human_summary, structured_steps
 
-    except ValidationError as ve: 
-        logger.error(f"Planner: Pydantic validation error during plan generation: {ve}", exc_info=True)
-        error_message = f"Plan parsing failed (validation error): {ve}"
-    except Exception as e: 
+    except Exception as e:
         logger.error(f"Planner: Error during plan generation: {e}", exc_info=True)
-        error_message = f"Unexpected error during plan generation: {e}"
-    
-    try:
-        error_chain = prompt_template | planner_llm | StrOutputParser()
-        raw_output = await error_chain.ainvoke(
-            invoke_payload, 
-            config=RunnableConfig(
-                callbacks=callback_handler if isinstance(callback_handler, BaseCallbackManager) else ([callback_handler] if callback_handler else None),
-                metadata={"component_name": LOG_SOURCE_PLANNER + "_ERROR_HANDLER"}
-            )
-        )
-        logger.error(f"Planner: Raw LLM output on error: {raw_output}")
-        error_message += f". Raw LLM output: {raw_output[:200]}..."
-    except Exception as raw_e:
-        logger.error(f"Planner: Failed to get raw LLM output on error: {raw_e}")
-        error_message += ". Failed to retrieve raw LLM output."
-
-    return {
-        "plan_summary": None,
-        "plan_steps": None,
-        "plan_generation_error": error_message
-    }
-
+        try:
+            error_chain = prompt_template | planner_llm | StrOutputParser() 
+            raw_output = await error_chain.ainvoke({
+                "user_query": user_query,
+                "available_tools_summary": available_tools_summary,
+                "format_instructions": format_instructions
+            })
+            logger.error(f"Planner: Raw LLM output on error: {raw_output}")
+        except Exception as raw_e:
+            logger.error(f"Planner: Failed to get raw LLM output on error: {raw_e}")
+        return None, None
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
+    async def test_planner_poem_generation():
+        query_poem = "Create a file called poem.txt and write in it a small poem about stars."
+        tools_summary = "- write_file: To write files to workspace.\n- read_file: To read files from workspace."
+        
+        print(f"\n--- Testing Planner with Poem Generation Query ---")
+        print(f"Query: {query_poem}")
+        summary, plan = await generate_plan(query_poem, tools_summary)
 
-    async def test_planner_main():
-        query_example = "Research the benefits of solar power and write a short summary file called 'solar_benefits.txt'."
-        tools_summary_example = (
-            "- tavily_search_api: For web searches.\n"
-            "- web_page_reader: To read content from a specific URL.\n"
-            "- write_file: To write text content to a file in the workspace."
-        )
-        
-        print(f"\n--- Testing Planner for query: \"{query_example}\" ---")
-        plan_result_dict = await generate_plan(query_example, tools_summary_example, callback_handler=None)
-        
-        if plan_result_dict.get("plan_generation_error"):
-            print(f"ERROR generating plan: {plan_result_dict['plan_generation_error']}")
-        elif plan_result_dict.get("plan_summary") and plan_result_dict.get("plan_steps"):
-            print("\n---- Human Readable Summary ----")
-            print(plan_result_dict["plan_summary"])
-            print("\n---- Structured Plan (List of Dictionaries) ----")
-            for i, step_data_dict in enumerate(plan_result_dict["plan_steps"]):
-                print(f"Step {step_data_dict.get('step_id', i+1)}:")
-                print(f"  Description: {step_data_dict.get('description')}")
-                print(f"  Tool: {step_data_dict.get('tool_to_use')}")
-                print(f"  Input Instructions: {step_data_dict.get('tool_input_instructions')}")
-                print(f"  Expected Outcome: {step_data_dict.get('expected_outcome')}")
+        if summary and plan:
+            print("---- Human Readable Summary ----")
+            print(summary)
+            print("\n---- Structured Plan ----")
+            for i, step_data in enumerate(plan):
+                if isinstance(step_data, dict):
+                    print(f"Step {step_data.get('step_id', i+1)}:")
+                    print(f"  Description: {step_data.get('description')}")
+                    print(f"  Tool: {step_data.get('tool_to_use')}")
+                    print(f"  Input Instructions: {step_data.get('tool_input_instructions')}")
+                    print(f"  Expected Outcome: {step_data.get('expected_outcome')}") 
+                else:
+                    print(f"Step {i+1}: Invalid step data format: {step_data}")
+            
+            if len(plan) > 0 and "poem about stars" in plan[0].get("description", "").lower():
+                print(f"\nDEBUG: Expected outcome for poem generation step (Step 1): '{plan[0].get('expected_outcome')}'")
+                if "actual text" in plan[0].get('expected_outcome', '').lower() or \
+                   "generated poem" in plan[0].get('expected_outcome', '').lower() or \
+                   "the poem itself" in plan[0].get('expected_outcome', '').lower():
+                    print("DEBUG: Step 1 expected outcome seems correctly formulated for direct content generation.")
+                else:
+                    print("DEBUG WARNING: Step 1 expected outcome might still be too indirect for direct content generation.")
         else:
-            print("Failed to generate a plan for the query. No summary or steps returned.")
-        print("--------------------------------------------------\n")
+            print("Failed to generate a plan for poem generation query.")
 
-    asyncio.run(test_planner_main())
+    asyncio.run(test_planner_poem_generation())

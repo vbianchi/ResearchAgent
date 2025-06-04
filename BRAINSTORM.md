@@ -1,71 +1,80 @@
-# BRAINSTORM.md - ResearchAgent Project (LangGraph Migration & Future Vision)
+BRAINSTORM.md - ResearchAgent Project (v2.6.0 In Progress)
+==========================================================
 
-This document tracks user feedback and brainstorming ideas for the ResearchAgent project, focusing on the transition to LangGraph and future capabilities.
+This document tracks current workflow ideas, user feedback, and immediate brainstorming for the ResearchAgent project. For longer-term plans and phased development, please see `ROADMAP.md`.
 
-**Current Version & State (Targeting V2.6.0 - LangGraph PCEE Loop Functional in Tests)**
+**Current Version & Focus (v2.6.0 - LangGraph Migration & Core Stability):**
 
-**Recent Key Advancements:**
-* **LangGraph Migration - Core PCEE Loop Achieved:** The primary Plan-Code-Execute-Evaluate (PCEE) workflow, including Intent Classification, Planning, Controller, Executor, Step Evaluator, iterative step processing, and Overall Evaluator, has been successfully implemented and tested as a stateful graph using LangGraph. [cite: 1] This provides explicit control over the agent's execution flow, improved state management, and a solid foundation for robust interruption/cancellation. [cite: 428, 461]
-* "Plug and Play" Tool System: Dynamic tool loading via `tool_config.json` remains functional and integrated. [cite: 431, 457]
-* Pydantic v2 Migration: Largely completed for core data models, LangGraph state, and tool arguments. [cite: 432, 458]
-* UI/UX Enhancements: Previous improvements to chat, plan proposal, token tracking, file uploads are in place. [cite: 433, 459]
+The ResearchAgent is actively undergoing a major architectural shift to LangGraph.
 
-**Immediate Focus: Stabilizing LangGraph Agent & Full Application Integration**
+-   **Key Backend Advancement: LangGraph PCEE Loop with Retry Logic:**
 
-1.  **Robust Retry Logic within LangGraph Loop:** [cite: 1]
-    * **Goal:** Enable the agent to intelligently retry failed plan steps.
-    * **Approach:** Enhance the `ControllerNode` to use feedback from the `StepEvaluatorNode` (e.g., `step_evaluation_suggested_tool`, `step_evaluation_suggested_input_instructions`) when a step is marked as recoverable. Manage `retry_count_for_current_step`.
+    -   The core Plan-Code-Execute-Evaluate (PCEE) workflow has been successfully implemented as a stateful graph using LangGraph. This includes nodes for intent classification, planning, control (tool/LLM selection), execution, step-by-step evaluation, and overall evaluation.
 
-2.  **Full Integration with Main Application (`server.py` & UI):** [cite: 1]
-    * **Goal:** Replace the old agent execution flow with the new LangGraph-based agent.
-    * **Approach:**
-        * Refactor `backend/message_processing/agent_flow_handlers.py` to invoke the compiled `research_agent_graph`.
-        * Ensure seamless communication via WebSockets, passing the `WebSocketCallbackHandler` to the graph for real-time UI updates (e.g., using `astream_events`).
-        * Handle `task_id` and session-specific LLM configurations through the graph's initial state or `RunnableConfig`.
+    -   **Crucially, the retry logic within this isolated LangGraph setup has been verified.** The graph correctly identifies recoverable step failures, increments retry counts, uses evaluator feedback for subsequent attempts, and respects the maximum retry limit for a given step. This was validated through the `langgraph_agent.py` test script.
 
-3.  **Implement `DIRECT_QA` Path in LangGraph:** [cite: 1]
-    * **Goal:** Efficiently handle simple questions that don't require full planning.
-    * **Approach:** Add a `DirectQANode` that is triggered if `classified_intent` is "DIRECT\_QA". This node will use an LLM to generate a direct answer, possibly using a simple search tool if needed. Its output can then flow to the `OverallEvaluatorNode` or directly to `END`.
+-   **Immediate Backend Focus: Server Integration:**
 
-4.  **Refine Tool Loading and Availability in Graph Nodes:** [cite: 1]
-    * **Goal:** Optimize tool loading if current dynamic loading in each node proves inefficient.
-    * **Approach:** Investigate passing tool instances/summaries via graph state or loading them once per graph invocation if toolset is static for the run.
+    -   The top priority is now integrating this fully functional LangGraph agent (from `langgraph_agent.py`) into the main application server (`server.py` and `agent_flow_handlers.py`). This involves replacing the older `AgentExecutor`-based flow with calls to the LangGraph, managing graph execution tasks, and ensuring the `WebSocketCallbackHandler` correctly streams updates to the UI.
 
-5.  **Enhance Error Handling and Overall Agent Robustness:** [cite: 1]
-    * **Goal:** Make the agent more resilient to unexpected errors.
-    * **Approach:** Implement more granular error catching within nodes, define clear error states, and ensure the graph can gracefully go to the `OverallEvaluatorNode` or `END` upon critical failures, providing useful feedback to the user.
+**UI/UX Feedback & Ideas (To be revisited/prioritized post-LangGraph integration):**
 
-6.  **CRITICAL Re-focus: Robust Task Interruption & Cancellation (within LangGraph):**
-    * **Goal:** Achieve reliable and prompt stopping/pausing of agent operations. [cite: 464]
-    * **Approach:** Now that the graph loop is functional, actively implement and test LangGraph's `interrupt` features, `asyncio.Task.cancel()` on graph execution tasks, and ensure cooperative cancellation within custom nodes/tools. [cite: 465] This is a primary objective of the LangGraph migration.
+1.  **Plan Confirmation UI (High Priority - Currently Blocked by Backend Changes):**
 
-7.  **Comprehensive Testing of the Integrated LangGraph Architecture.** [cite: 449, 467]
+    -   **Issue:** The legacy backend sends a `propose_plan_for_confirmation` message type, but the frontend (`script.js`) does not yet handle it.
 
-## Future Brainstorming / Enhanced Capabilities (Post-LangGraph Stability)
+    -   **Note:** With LangGraph, plan proposal and confirmation might be handled differently, possibly through streamed messages directly from the `PlannerNode` or a dedicated confirmation step within the graph. This UI aspect will be re-evaluated once the LangGraph backend is integrated.
 
-**Leveraging LangGraph's Strengths:**
+2.  **Chat Clutter & Plan Display Format (High Priority - Post LangGraph Integration):**
 
-1.  **Key Strategic Enhancement: `PythonSandboxTool` (CodeAct-Inspired Integration)**
-    * **Concept:** Introduce a powerful, specialized tool within the LangGraph framework that allows the agent to generate and execute Python code on-the-fly to handle complex or novel sub-tasks. [cite: 449, 468, 577] This aligns with the user's enthusiasm for "Idea 1." [cite: 468]
-    * **Mechanism:**
-        * Invocation: LangGraph Controller node decides to use `PythonSandboxTool`. [cite: 468]
-        * Input: Natural language description of the sub-task, relevant context. [cite: 469, 578]
-        * Internal LLM (Code Generation): Translates sub-task to Python script. [cite: 470, 579]
-        * Sandboxed Execution: Secure, isolated environment (e.g., Docker, restricted interpreter) with controlled library/file access. [cite: 471, 472, 473, 474, 580] May allow calling other atomic tools. [cite: 474]
-        * Output: Script output (stdout, stderr), generated files, success/error status. [cite: 475, 581]
-    * **Benefits:** Massive flexibility, reduced need for hyper-specific tools, leverages specialized coding models, enhanced problem-solving. [cite: 476, 477, 478, 479, 582, 583]
-    * **Challenges & Considerations:** Sandbox security, reliability of generated code (potential for LangGraph-based debug loops), prompt engineering, resource management, observability. [cite: 480, 481, 482, 483, 484, 485, 584]
-2.  **True Asynchronous Background Task Processing (Enabled by LangGraph's State/Checkpointing).** [cite: 451, 486, 576]
-3.  **More Complex Agentic Behaviors (Advanced Self-Correction, Multi-Actor Agents).** [cite: 452, 486]
-4.  **Persistent Agent State / Memory (across sessions for long-running tasks).** [cite: 486]
-5.  **Sophisticated Human-in-the-Loop (HITL) Workflows.** [cite: 486]
-6.  **Further Tool Ecosystem Expansion (Rscript, specialized DB queries, etc.).** [cite: 453, 486]
+    -   **User Feedback:** The desire is for a cleaner interface, distinguishing clearly between direct agent-user messages and status/progress updates. Detailed plans should be less intrusive.
 
-## Open Questions / Areas for Investigation with LangGraph & CodeAct Hybrid
-* Design of the `PythonSandboxTool`'s internal LLM prompting.
-* Security and isolation for the Python sandbox.
-* Error handling and debugging for LLM-generated code by `PythonSandboxTool`. [cite: 483]
-* Context passing to `PythonSandboxTool` for relevant code generation. [cite: 487]
-* Interaction between LangGraph cancellation and sandbox execution. [cite: 488]
+    -   **LangGraph Implication:** LangGraph's event streaming capabilities should allow for more granular control over what gets sent to the main chat versus the monitor log.
 
-This hybrid approach, with LangGraph as the backbone and a CodeAct-inspired `PythonSandboxTool` as a key capability, seems like a very promising direction to achieve the desired power, flexibility, and control. [cite: 489]
+3.  **Color-Coding Agent Workspace & LLM Selectors (Medium Priority):**
+
+    -   **User Idea:** Visually differentiate messages in the Agent Workspace (Monitor Log) based on the agent component (Planner, Controller, Executor, Evaluator) and link to LLM selectors.
+
+    -   **LangGraph Implication:** Node-specific outputs from LangGraph can be tagged to facilitate this color-coding in the UI via the callback handler.
+
+**Illustrative Workflow (Conceptual - Post LangGraph Integration):**
+
+1.  User: "Use the Python REPL tool to obtain the literal string 'Python is fun!' (including the single quotes). Then, write this exact string to a file named 'python_quote.txt'."
+
+2.  `IntentClassifierNode` (LangGraph): Classifies as `PLAN`.
+
+3.  `PlannerNode` (LangGraph): Generates a plan:
+
+    -   Step 1: Use `Python_REPL` to get "'Python is fun!'". Expected: The literal string.
+
+    -   Step 2: Use `write_file` to save the string to "python_quote.txt". Expected: File created.
+
+4.  **LangGraph Execution Loop Begins:**
+
+    -   **Step 1 - Attempt 1:**
+
+        -   `ControllerNode`: Decides `Python_REPL` with input, e.g., `"'Python is fun!'"` (or `print(...)`).
+
+        -   `ExecutorNode`: Executes `Python_REPL`. Let's assume the tool initially fails to capture output (e.g., returns empty string due to a subtle tool issue).
+
+        -   `StepEvaluatorNode`: Detects failure (output "" != expected "'Python is fun!'"). Marks as recoverable. Suggests retry, perhaps with `print(repr(...))`. Increments retry count for this step to 1.
+
+    -   **Step 1 - Attempt 2 (Retry):**
+
+        -   `ControllerNode`: Uses feedback. Decides `Python_REPL` with input `print(repr('Python is fun!'))`.
+
+        -   `ExecutorNode`: Executes. `PythonREPLTool` now (hopefully) returns `"'Python is fun!'"`.
+
+        -   `StepEvaluatorNode`: Output matches expected. Marks step as successful. Resets retry count for *next* step. `previous_step_executor_output` now holds `"'Python is fun!'"`.
+
+    -   **Step 2 - Attempt 1:**
+
+        -   `ControllerNode`: Sees plan for writing file. Uses `previous_step_executor_output` (`"'Python is fun!'"`) to formulate input for `write_file` tool (e.g., `python_quote.txt:::'Python is fun!'`).
+
+        -   `ExecutorNode`: Executes `write_file`.
+
+        -   `StepEvaluatorNode`: Confirms file written successfully.
+
+5.  `OverallEvaluatorNode` (LangGraph): Assesses overall success. Sends final assessment.
+
+This document will be updated as we progress with the LangGraph integration and new ideas emerge.

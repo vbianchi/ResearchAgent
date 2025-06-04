@@ -1,69 +1,173 @@
-# ResearchAgent: Project Roadmap (Transitioning to LangGraph with a Vision for CodeAct)
+ResearchAgent: Project Roadmap (v2.6.0 In Progress)
+===================================================
 
-This document outlines the planned development path for the ResearchAgent project, reflecting a strategic shift towards using LangGraph for core agent orchestration and a future vision for incorporating CodeAct-inspired dynamic code execution. [cite: 605]
+This document outlines the planned development path for the ResearchAgent project. It is a living document and will be updated as the project evolves.
 
-## Guiding Principles
--   **Robustness & Control:** Prioritize architectures that offer explicit state management and reliable task lifecycle control. [cite: 606]
--   **Flexibility & Power:** Enable the agent to tackle a wider range of complex tasks. [cite: 607]
--   **User-Centricity:** Improve research efficiency and user experience. [cite: 608]
--   **Modularity & Iteration:** Design for maintainability and incremental improvement. [cite: 609]
+Guiding Principles for Development
+----------------------------------
 
-## Phase 1: Initial LangChain-based Implementation & Learnings (Completed)
--   Developed a foundational UI/backend with a PCEE agent using LangChain `AgentExecutor`. [cite: 610]
--   Key Learning: Highlighted the need for more robust asynchronous task control, reliable cancellation, and a more flexible action paradigm, leading to the strategic decisions for subsequent phases. [cite: 611]
+-   Accuracy & Reliability Over Speed
 
-## Phase 2: LangGraph Migration & Core Stability (Current Focus - V2.6.0 Target)
-This phase is dedicated to migrating the core agent logic to LangGraph to build a more robust, controllable, and observable foundation. [cite: 612]
+-   User-in-the-Loop (UITL/HITL)
 
-1.  **CRITICAL: Migrate PCEE Workflow to LangGraph:** (Largely Completed in Test Environment) [cite: 1, 613]
-    * **Description:** Re-implemented Intent Classification, Planner, Controller, Executor logic, Step-wise Evaluator, and Overall Evaluator as a stateful graph in LangGraph. Includes iterative processing of plan steps. [cite: 1, 613]
-    * **Goal:** A fully functional PCEE loop on LangGraph, retaining and enhancing existing agent capabilities. [cite: 614]
-    * **Status:** Core loop functional in tests. Next steps focus on retry logic and full application integration.
+-   Modularity & Maintainability
 
-2.  **CRITICAL: Implement Robust Task Interruption & Cancellation on LangGraph:** (Next Major Focus after Core Loop Stabilization) [cite: 1, 615]
-    * **Description:** Utilize LangGraph's interrupt features, `asyncio.Task` management, and callback checks to ensure STOP signals and context switches reliably halt or pause graph executions. [cite: 615]
-    * **Goal:** Responsive and reliable task lifecycle control. [cite: 615]
+-   Extensibility
 
-3.  **HIGH: Refine and Integrate Core LangGraph Agent into Main Application:** (Next Steps)
-    * **Implement Robust Retry Logic:** Enhance Controller and loop to use Step Evaluator feedback for retrying failed steps. [cite: 1]
-    * **Integrate with `server.py`:** Replace old agent flow, manage WebSocket communication for real-time updates via graph events. [cite: 1]
-    * **Implement `DIRECT_QA` Path:** Add a dedicated path in LangGraph for direct question answering. [cite: 1]
-    * **Refine Tool Loading:** Optimize if necessary. [cite: 1]
-    * **Enhance Error Handling:** Improve overall agent robustness. [cite: 1]
-    * **UI Feedback:** Ensure rich UI feedback via LangGraph's streaming capabilities (`astream_events`). [cite: 575, 617]
-    * **Re-validate Core Features:** Tool System (Plug and Play for LangGraph nodes [cite: 616]), State Checkpointing (for resilience, future pause/resume [cite: 616]), Artifact Management (integration with graph events [cite: 618]).
+Phase 1: Core Stability & Foundational Tools (Largely Complete - Basis of v2.5.1)
+---------------------------------------------------------------------------------
 
-4.  **HIGH: Comprehensive Testing of the New LangGraph-based Architecture.** (Ongoing with each integration) [cite: 618]
+-   **UI Framework:** Three-panel layout.
 
-## Phase 3: V2.x Enhancements (Building on Stable LangGraph Foundation)
-Focus on leveraging LangGraph for enhanced user experience and initial advanced features.
+-   **Backend Infrastructure:** Python, WebSockets, HTTP file server.
 
-1.  **SHOULD HAVE: Implement Basic Concurrent Task Processing:** (Post-Core Stability) [cite: 619]
-    * **Description:** Allow one agent task (LangGraph execution) to run in the background while the user interacts with a new foreground task, using LangGraph's state and checkpointing. [cite: 619, 620]
-    * **Goal:** Support for "one active + one background" task per session. [cite: 621]
-2.  **SHOULD HAVE: UI/UX Polish & Feature Completion:**
-    * Refine global status indicators, "View [artifact] in Artifacts" links. [cite: 622]
-    * Address lower-priority UI bugs. [cite: 622]
-3.  **SHOULD HAVE: "Plug and Play" Tool System Finalization on LangGraph:**
-    * Complete formalization of Tool Input/Output Schemas. [cite: 623]
-    * Finalize the New Tool Integration Guide for the LangGraph context. [cite: 624]
-4.  **SHOULD HAVE: Make Tavily Search Optional (User Configuration).** [cite: 624]
+-   **Task Management:** Create, select, delete, rename tasks with persistent storage.
 
-## Phase 4: Future Iterations (Advanced Capabilities & `PythonSandboxTool`)
-Focus on significantly expanding agent capabilities and intelligence. [cite: 625]
+-   **Legacy Agent Flow (AgentExecutor-based):** Intent Classification, P-C-E-E pipeline.
 
-1.  **KEY STRATEGIC FEATURE: Develop `PythonSandboxTool` (CodeAct-Inspired):** [cite: 625]
-    * **Description:** Implement a specialized tool for LangGraph that allows the agent to request the generation and sandboxed execution of Python code for complex or novel sub-tasks. [cite: 626] The tool will internally use a code-generation LLM. [cite: 627] Scripts will run in a secure sandbox. [cite: 628]
-    * **Goal:** Provide powerful, dynamic problem-solving capabilities, reducing the need for many predefined granular tools. [cite: 628, 629] This aligns with user enthusiasm. [cite: 629]
-    * **Impact:** Transforms the agent's ability to handle unforeseen challenges. [cite: 630]
-2.  **NICE TO HAVE: Advanced Agent Reasoning & Self-Correction:**
-    * Utilize LangGraph's cyclical nature for more sophisticated error handling, code debugging (especially for the `PythonSandboxTool`), and plan refinement loops. [cite: 631]
-3.  **NICE TO HAVE: Further Tool Ecosystem Expansion:**
-    * Rscript Execution Tool, enhanced PDF processing, specialized bioinformatics tools, data visualization tools, etc., built for the LangGraph architecture. [cite: 632]
-4.  **NICE TO HAVE: Advanced UI/UX & Workspace Enhancements:**
-    * Visual graph execution monitor. [cite: 633]
+    -   Inter-step data flow fixed.
 
-## Phase 5: Advanced Agent Autonomy & Specialized Applications (Longer-Term)
-(Explore more autonomous agent behaviors, long-term memory solutions, and potential cloud deployment scenarios, building on the robust and flexible LangGraph + CodeAct-inspired foundation.) [cite: 634]
+    -   Evaluator message persistence fixed.
 
-This roadmap now strongly reflects the strategic shift to LangGraph, our current progress, and the exciting future potential of integrating CodeAct principles. [cite: 634]
+-   **Core Tools:** Web search, file I/O, PubMed, web reader, DeepResearchTool v1.
+
+-   **LLM Configuration:** Gemini & Ollama, role-specific.
+
+-   **Frontend & Backend Refactoring (v2.5.1):** Modularized JavaScript and Python message handlers.
+
+-   **Numerous Stability Fixes.**
+
+Phase 2: LangGraph Migration & Core Stability (v2.6.0 - CURRENT & CRITICAL FOCUS)
+---------------------------------------------------------------------------------
+
+The primary goal of this phase is to migrate the core agentic backend to LangGraph and integrate it fully into the main application server for enhanced control, state management, and reliability.
+
+1.  **LangGraph PCEE Loop with Retry Logic (Isolated Testing - COMPLETE)**
+
+    -   **Goal:** Develop and test a stateful Plan-Code-Execute-Evaluate (PCEE) graph using LangGraph.
+
+    -   **Details:**
+
+        -   Implemented nodes: `IntentClassifierNode`, `PlannerNode`, `ControllerNode`, `ExecutorNode`, `StepEvaluatorNode`, `OverallEvaluatorNode`.
+
+        -   Implemented iterative step processing with state updates.
+
+        -   **Implemented and verified robust retry logic within the graph:**
+
+            -   `StepEvaluatorNode` correctly identifies recoverable errors and suggests retry actions (tool, input instructions).
+
+            -   `StepEvaluatorNode` correctly increments `retry_count_for_current_step` and maintains `current_step_index` for retries.
+
+            -   `ControllerNode` utilizes feedback from `StepEvaluatorNode` for retry attempts.
+
+            -   The graph respects `MAX_STEP_RETRIES` for a given step.
+
+    -   **Status: COMPLETE** (Tested successfully in isolation via `langgraph_agent.py`).
+
+2.  **CRITICAL: Integrate LangGraph Agent with Main Application (`server.py`) (Top Priority - IN PROGRESS)**
+
+    -   **Goal:** Replace the legacy `AgentExecutor`-based workflow with the new LangGraph-based agent in the live application.
+
+    -   **Details:**
+
+        -   **Modify `backend/message_processing/agent_flow_handlers.py`:**
+
+            -   Update `process_user_message` (and potentially `process_execute_confirmed_plan` or a new handler) to prepare initial state and invoke the `research_agent_graph.astream()` method.
+
+        -   **Adapt `backend/server.py`:**
+
+            -   Manage the lifecycle of the compiled `research_agent_graph` (e.g., instantiate once).
+
+            -   Adapt session data management (`session_data`, `connected_clients`) to support LangGraph executions, including storing and managing the `asyncio.Task` for each graph run.
+
+        -   **Integrate `WebSocketCallbackHandler`:**
+
+            -   Ensure the existing `WebSocketCallbackHandler` (or an adapted/new version) is correctly instantiated per session and passed into the graph's `RunnableConfig`.
+
+            -   Verify/update callback methods to handle events and data streamed from the LangGraph (e.g., node outputs, state changes). Consider using `astream_events` for more granular updates if beneficial.
+
+        -   **Implement Streaming of Graph Outputs:**
+
+            -   Stream node-generated AIMessages, status updates, tool calls, and final evaluations to the UI via the callback handler for real-time feedback.
+
+        -   **Handle `task_id` and LLM Configurations:**
+
+            -   Ensure `task_id` (for workspace and tool context) and session-specific LLM overrides are correctly passed into the LangGraph's initial state or `RunnableConfig`.
+
+    -   **Status: IN PROGRESS (This is the immediate next development task).**
+
+3.  **Implement `DIRECT_QA` Path in Integrated LangGraph (Post-Integration)**
+
+    -   **Goal:** Route "DIRECT_QA" intents to a dedicated `DirectQANode` within the main LangGraph.
+
+    -   **Details:** This node will use an LLM for direct answers, with output flowing to the `OverallEvaluatorNode`.
+
+    -   **Status:** Planned (after core integration).
+
+4.  **CRITICAL: Robust Task Interruption & Cancellation for Integrated LangGraph (Post-Integration)**
+
+    -   **Goal:** Enable reliable stopping of ongoing LangGraph executions via the UI's "STOP" button.
+
+    -   **Details:**
+
+        -   Leverage LangGraph's built-in interrupt mechanisms.
+
+        -   Use `asyncio.Task.cancel()` on the graph execution task managed in `server.py`.
+
+        -   Ensure `_check_cancellation` in `WebSocketCallbackHandler` (or equivalent checks within graph nodes) effectively halts processing.
+
+    -   **Status:** Planned (after core integration and basic functionality is verified).
+
+5.  **Refine Tool Loading and Availability in Integrated LangGraph Nodes (Post-Integration)**
+
+    -   **Status:** Planned.
+
+6.  **Enhance Error Handling and Overall Robustness (Post-Integration)**
+
+    -   **Status:** Planned.
+
+7.  **Comprehensive UI Testing of the Integrated LangGraph Architecture (Post-Integration)**
+
+    -   **Status:** Planned.
+
+8.  **Implement UI for Concise Plan Proposal & Interaction (Deferred - Post LangGraph Integration)**
+
+    -   **Goal:** Create a clean, user-friendly way to confirm plans, reducing chat clutter.
+
+    -   **Status:** Design exists, implementation deferred until LangGraph backend is stable. The current `display_plan_for_confirmation` message will be adapted or replaced by direct streaming from LangGraph nodes.
+
+Phase 3: Advanced Interactivity & Tooling (Mid-Term - Post v2.6.0)
+------------------------------------------------------------------
+
+(Items largely remain the same as previous roadmap, but depend on successful LangGraph migration)
+
+-   **Advanced User-in-the-Loop (UITL/HITL) Capabilities:**
+
+    -   Agent-initiated interaction points during plan execution (e.g., asking for clarification, choices).
+
+-   **New Tools & Tool Refinements:**
+
+    -   **Key Strategic Enhancement: `PythonSandboxTool` (CodeAct-Inspired):** A more robust and isolated environment for Python code execution, potentially using Docker or a similar sandboxing technology. This is a major feature.
+
+    -   Data visualization tools.
+
+    -   Version control integration (e.g., Git).
+
+-   **Workspace RAG (Retrieval Augmented Generation):**
+
+    -   Enable the agent to perform semantic search and retrieval over documents within the current task's workspace.
+
+Phase 4: Advanced Agent Autonomy & Specialized Applications (Longer-Term)
+-------------------------------------------------------------------------
+
+-   **Advanced Re-planning & Self-Correction within LangGraph.**
+
+-   **User Permission Gateway for Sensitive Tools.**
+
+-   **Full Streaming Output for all Agent Steps/Thoughts to UI.**
+
+-   **Specialized Agent Personas & Fine-tuning.**
+
+-   **Concurrent Task Processing.**
+
+This roadmap will guide our development efforts. Feedback and adjustments are welcome as the project progresses.
