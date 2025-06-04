@@ -1,579 +1,250 @@
-# backend/langgraph_agent.py
-import asyncio
+# backend/langgraph_agent.py (Part 1/2)
 import logging
-import json
-from typing import Dict, Any, Optional, List, TypedDict, Annotated, Union
-from uuid import uuid4
-import operator
+from typing import TypedDict, Optional, List, Annotated, Dict, Any
 
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from langchain_core.pydantic_v1 import BaseModel, Field
+from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, ToolMessage
 from langgraph.graph import StateGraph, END
-# from langgraph.checkpoint.sqlite import SqliteSaver # For persistence - Commented out due to ModuleNotFoundError
-from langchain_core.runnables import RunnableConfig
+# from langgraph.checkpoint.sqlite import SqliteSaver # Commented out
 
-
-# Project specific imports
 from backend.config import settings
-from backend.intent_classifier import classify_intent 
-from backend.planner import generate_plan, PlanStep
-from backend.controller import validate_and_prepare_step_action, ControllerOutput
-from backend.evaluator import (
-    evaluate_step_outcome_and_suggest_correction, StepCorrectionOutcome,
-    evaluate_plan_outcome, EvaluationResult
-)
-from backend.tools.standard_tools import get_dynamic_tools
-from backend.tools.standard_tools import get_task_workspace_path 
 
-# --- Logging Setup ---
-logging.basicConfig(level=settings.log_level, format='%(asctime)s - %(levelname)s - %(name)s - %(module)s - %(funcName)s - Line %(lineno)d - %(message)s')
 logger = logging.getLogger(__name__)
 
-
-# --- Constants ---
-MAX_STEP_RETRIES = settings.agent_max_step_retries
-
-# --- State Definition for the Graph ---
-class ResearchAgentState(TypedDict):
+# --- Define State ---
+class ResearchAgentState(TypedDict, total=False):
     user_query: str
-    messages: Annotated[List[BaseMessage], operator.add]
-    task_id: str
     classified_intent: Optional[str]
-    intent_classifier_reasoning: Optional[str]
-    plan_summary: Optional[str]
-    plan_steps: Optional[List[PlanStep]]
-    plan_generation_error: Optional[str]
+    plan_steps: Optional[List[Dict[str, Any]]]
     current_step_index: int
+    current_task_id: Optional[str]
+    chat_history: Optional[List[BaseMessage]]
+    controller_output_tool_name: Optional[str]
+    controller_output_tool_input: Optional[str]
+    executor_output: Optional[str]
     previous_step_executor_output: Optional[str]
+    step_evaluator_output: Optional[Dict[str, Any]]
+    overall_evaluator_output: Optional[Dict[str, Any]]
     retry_count_for_current_step: int
-    controller_tool_name: Optional[str]
-    controller_tool_input: Optional[Union[str, Dict[str, Any]]]
-    controller_reasoning: Optional[str]
-    controller_confidence: Optional[float]
-    controller_error: Optional[str]
-    current_executor_output: Optional[str]
-    executor_error_message: Optional[str]
-    step_evaluation_achieved_goal: Optional[bool]
-    step_evaluation_assessment: Optional[str]
-    step_evaluation_is_recoverable: Optional[bool]
-    step_evaluation_suggested_tool: Optional[str]
-    step_evaluation_suggested_input_instructions: Optional[str]
-    step_evaluation_confidence_in_correction: Optional[float]
-    step_evaluation_error: Optional[str]
-    overall_evaluation_success: Optional[bool]
-    overall_evaluation_assessment: Optional[str]
-    overall_evaluation_final_answer_content: Optional[str]
-    overall_evaluation_suggestions_for_replan: Optional[List[str]]
-    overall_evaluation_error: Optional[str]
-    error_message: Optional[str]
-    session_intent_classifier_llm_id: Optional[str]
-    session_planner_llm_id: Optional[str]
-    session_controller_llm_id: Optional[str]
-    session_executor_llm_id: Optional[str]
-    session_evaluator_llm_id: Optional[str]
+    accumulated_plan_summary: str
+    tool_config: Optional[Dict[str, Any]]
 
+# --- Placeholder Node Functions ---
+async def placeholder_intent_classifier_node(state: ResearchAgentState) -> Dict[str, Any]:
+    logger.info(">>> NODE: Intent Classifier (Placeholder)")
+    intent = state.get("classified_intent", "DIRECT_QA")
+    logger.info(f"Intent classified as: {intent}")
+    return {"classified_intent": intent, "current_step_index": 0, "retry_count_for_current_step": 0}
 
-# --- Node Functions ---
+async def placeholder_direct_qa_node(state: ResearchAgentState) -> Dict[str, Any]:
+    logger.info(">>> NODE: Direct QA (Placeholder)")
+    user_query = state.get("user_query", "No query in state")
+    answer = f"Placeholder direct answer to: {user_query}"
+    logger.info(f"Direct QA generated answer: {answer}")
+    return {"overall_evaluator_output": {"assessment": answer, "overall_success": True, "is_direct_qa": True}}
 
-async def intent_classifier_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    logger.info("--- Entering Intent Classifier Node ---")
-    user_query = state["user_query"]
-    task_id = state.get("task_id", "default_task_for_intent") 
+async def placeholder_planner_node(state: ResearchAgentState) -> Dict[str, Any]:
+    logger.info(">>> NODE: Planner (Placeholder)")
+    plan = [{"step_id": 1, "description": "Placeholder: Do step 1", "tool_to_use": "some_tool", "expected_outcome": "Step 1 done"}]
+    logger.info(f"Plan generated: {plan}")
+    return {"plan_steps": plan, "current_step_index": 0, "retry_count_for_current_step": 0, "accumulated_plan_summary": "Plan:\n1. Do step 1\n"}
 
-    available_tools = get_dynamic_tools(task_id)
-    tools_summary_for_intent = "\n".join([f"- {tool.name}: {tool.description.split('.')[0]}" for tool in available_tools])
+async def placeholder_controller_node(state: ResearchAgentState) -> Dict[str, Any]:
+    logger.info(">>> NODE: Controller (Placeholder)")
+    plan_steps = state.get("plan_steps", [])
+    current_idx = state.get("current_step_index", 0)
+    step_info = plan_steps[current_idx] if plan_steps and 0 <= current_idx < len(plan_steps) else {}
+    logger.info(f"Controller for step {current_idx + 1}: {step_info.get('description')}")
+    return {"controller_output_tool_name": step_info.get("tool_to_use", "None"), 
+            "controller_output_tool_input": "placeholder_input_for_tool"}
+
+async def placeholder_executor_node(state: ResearchAgentState) -> Dict[str, Any]:
+    logger.info(">>> NODE: Executor (Placeholder)")
+    tool_name = state.get("controller_output_tool_name", "None")
+    tool_input = state.get("controller_output_tool_input", "")
+    logger.info(f"Executing tool: {tool_name} with input: {tool_input}")
+    output = f"Placeholder output from {tool_name}."
+    return {"executor_output": output}
+
+async def placeholder_step_evaluator_node(state: ResearchAgentState) -> Dict[str, Any]:
+    logger.info(">>> NODE: Step Evaluator (Placeholder)")
+    current_idx = state.get("current_step_index", 0)
+    executor_out = state.get("executor_output", "")
+    # Simulate success for simplicity in this placeholder
+    eval_output = {"step_achieved_goal": True, "assessment_of_step": "Placeholder: Step looks good.", "is_recoverable_via_retry": False}
+    logger.info(f"Step {current_idx + 1} evaluation: Achieved={eval_output['step_achieved_goal']}")
     
-    intent_str_output = await classify_intent(
-        user_query=user_query,
-        available_tools_summary=tools_summary_for_intent
-    )
-    
-    classified_intent_str: str
-    reasoning_str: str 
+    new_accumulated_summary = state.get("accumulated_plan_summary", "") + f"Step {current_idx + 1} Output: {executor_out[:100]}\n"
 
-    if isinstance(intent_str_output, str) and intent_str_output in ["PLAN", "DIRECT_QA"]:
-        classified_intent_str = intent_str_output
-        reasoning_str = f"Intent classified as {classified_intent_str} by intent_classifier module (detailed reasoning is logged by that module)."
+    if eval_output["step_achieved_goal"]:
+        return {
+            "step_evaluator_output": eval_output,
+            "previous_step_executor_output": executor_out,
+            "retry_count_for_current_step": 0, 
+            "accumulated_plan_summary": new_accumulated_summary
+        }
     else: 
-        # This case should ideally not be hit if classify_intent is robust.
-        # The warning from the log: "classify_intent returned unexpected value: 'intent='PLAN' reasoning=..."
-        # indicates that classify_intent might be returning a formatted string instead of just "PLAN" or "DIRECT_QA".
-        # For robustness, let's try to parse it if it looks like the log string.
-        raw_output_str = str(intent_str_output)
-        logger.warning(f"intent_classifier_node: classify_intent returned an unexpected value/type: '{raw_output_str}'. Attempting to parse.")
-        if "intent='PLAN'" in raw_output_str:
-            classified_intent_str = "PLAN"
-            reasoning_str = raw_output_str # Store the full string as reasoning for now
-        elif "intent='DIRECT_QA'" in raw_output_str:
-            classified_intent_str = "DIRECT_QA"
-            reasoning_str = raw_output_str
-        else:
-            classified_intent_str = "PLAN" # Default
-            reasoning_str = f"classify_intent returned unparsable value '{raw_output_str}', defaulted to PLAN."
-
-    logger.info(f"Intent classification result in langgraph_agent: intent='{classified_intent_str}', reasoning_detail='{reasoning_str}'")
-    return {
-        "classified_intent": classified_intent_str,
-        "intent_classifier_reasoning": reasoning_str, 
-        "messages": [AIMessage(content=f"Intent Classified as: {classified_intent_str}\n(Reasoning: {reasoning_str})")]
-    }
-
-
-async def planner_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    logger.info("--- Entering Planner Node ---")
-    if state["classified_intent"] != "PLAN":
-        logger.info("Planner Node: Intent is not PLAN, skipping plan generation.")
-        return {"plan_summary": "No plan needed.", "plan_steps": []}
-
-    user_query = state["user_query"]
-    task_id = state.get("task_id", "default_task_for_planner")
-    logger.info(f"Planner Node: current_task_id_for_tools from state: {task_id}")
-
-    available_tools = get_dynamic_tools(task_id)
-    tools_summary = "\n".join([f"- {tool.name}: {tool.description.split('.')[0]}" for tool in available_tools])
-
-    plan_result = await generate_plan(
-        user_query=user_query,
-        available_tools_summary=tools_summary,
-    )
-    logger.info(f"Planner Node (DEBUG): Raw result from generate_plan - Type: {type(plan_result)}, Value: '{str(plan_result)[:500]}...'")
-
-    if plan_result and isinstance(plan_result, tuple) and len(plan_result) == 2:
-        summary, steps_dicts = plan_result
-        if summary and steps_dicts is not None: 
-            plan_steps_models = [PlanStep(**step_data) for step_data in steps_dicts]
-            logger.info(f"Planner Node: Plan generated. Summary: {summary}")
-            return {
-                "plan_summary": summary,
-                "plan_steps": plan_steps_models,
-                "current_step_index": 0, 
-                "retry_count_for_current_step": 0,
-                "messages": [AIMessage(content=f"Plan Generated:\nSummary: {summary}\nSteps:\n" + "\n".join(f"{i+1}. {s.description}" for i, s in enumerate(plan_steps_models)))]
-            }
-    
-    logger.error(f"Planner Node: Failed to generate plan or generate_plan returned unexpected structure. Result: {plan_result}")
-    return {
-        "plan_summary": "Failed to generate a plan.",
-        "plan_steps": [],
-        "plan_generation_error": "Planner failed to produce a valid plan structure or returned unexpected data.",
-        "messages": [AIMessage(content="Error: Failed to generate a plan.")]
-    }
-
-async def controller_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    logger.info("--- Entering Controller Node ---")
-    current_step_idx = state["current_step_index"]
-    plan_steps = state.get("plan_steps", [])
-    task_id = state.get("task_id", "default_task_for_controller")
-    
-    if not plan_steps or current_step_idx >= len(plan_steps):
-        logger.warning("Controller Node: No plan steps or index out of bounds. Cannot proceed.")
-        return {"controller_error": "No plan steps or index out of bounds."}
-
-    current_plan_step = plan_steps[current_step_idx]
-    attempt_number = state.get("retry_count_for_current_step", 0) + 1
-    logger.info(f"Controller Node: Processing Step {current_step_idx + 1}/{len(plan_steps)}: '{current_plan_step.description}' (Attempt: {attempt_number})")
-
-    if state.get("retry_count_for_current_step", 0) >= MAX_STEP_RETRIES and attempt_number > MAX_STEP_RETRIES : 
-        logger.warning(f"Controller Node: Entered for Step {current_step_idx + 1} which has already reached max retries ({state.get('retry_count_for_current_step', 0)} >= {MAX_STEP_RETRIES}). This indicates a potential routing issue if this is not the final allowed attempt.")
-
-    available_tools = get_dynamic_tools(task_id)
-    
-    plan_step_for_controller_call = current_plan_step.copy(deep=True)
-    if state.get("retry_count_for_current_step", 0) > 0:
-        logger.info(f"Controller Node: This is a retry (attempt {attempt_number}). Using evaluator suggestions if available.")
-        suggested_tool = state.get("step_evaluation_suggested_tool")
-        suggested_input_instr = state.get("step_evaluation_suggested_input_instructions")
-
-        if suggested_tool is not None: 
-            plan_step_for_controller_call.tool_to_use = suggested_tool if suggested_tool != "None" else None
-            logger.info(f"  Retry: Overriding tool to: '{plan_step_for_controller_call.tool_to_use}'")
-        if suggested_input_instr is not None:
-            plan_step_for_controller_call.tool_input_instructions = suggested_input_instr
-            logger.info(f"  Retry: Overriding input instructions to: '{suggested_input_instr[:100]}...'")
-            
-    # Using positional arguments as a diagnostic for the TypeError
-    controller_output_model_or_tuple: Optional[Union[ControllerOutput, Tuple]]
-    controller_output_model_or_tuple = await validate_and_prepare_step_action(
-        state["user_query"],                       
-        plan_step_for_controller_call,             
-        available_tools,                           
-        state,                                     
-        state.get("previous_step_executor_output") 
-    )
-
-    # Ensure controller_output_model is of ControllerOutput type
-    controller_output_model: Optional[ControllerOutput] = None
-    if isinstance(controller_output_model_or_tuple, ControllerOutput):
-        controller_output_model = controller_output_model_or_tuple
-    elif isinstance(controller_output_model_or_tuple, tuple) and len(controller_output_model_or_tuple) == 4:
-        # This path is if validate_and_prepare_step_action was an older version returning a tuple
-        # For safety, try to parse it into the Pydantic model. This may not be hit if it's truly None.
-        try:
-            tool_name, tool_input, reasoning, confidence = controller_output_model_or_tuple
-            controller_output_model = ControllerOutput(
-                tool_name=tool_name, 
-                tool_input=tool_input, 
-                reasoning=reasoning, 
-                confidence=confidence
-            )
-        except Exception as e:
-            logger.error(f"Controller Node: Error converting tuple output from validate_and_prepare_step_action to ControllerOutput: {e}")
-            controller_output_model = None # Failed to parse
-    elif controller_output_model_or_tuple is None:
-        logger.info("Controller Node: validate_and_prepare_step_action returned None.")
-        # controller_output_model remains None
-    else:
-        logger.error(f"Controller Node: Unexpected return type from validate_and_prepare_step_action: {type(controller_output_model_or_tuple)}")
-        # controller_output_model remains None
-
-
-    if controller_output_model:
-        logger.info(f"Controller LLM decided: Tool='{controller_output_model.tool_name}', Input (summary)='{str(controller_output_model.tool_input)[:100]}...', Confidence={controller_output_model.confidence_score:.2f}")
         return {
-            "controller_tool_name": controller_output_model.tool_name,
-            "controller_tool_input": controller_output_model.tool_input,
-            "controller_reasoning": controller_output_model.reasoning,
-            "controller_confidence": controller_output_model.confidence_score,
-            "messages": [AIMessage(content=f"Controller for Step {current_step_idx + 1} (Attempt {attempt_number}):\n  Tool: {controller_output_model.tool_name or 'None'}\n  Input (summary): {str(controller_output_model.tool_input)[:100]}...\n  Reasoning: {controller_output_model.reasoning[:100]}...")]
-        }
-    else:
-        logger.error("Controller Node: Failed to get valid output from controller LLM or validate_and_prepare_step_action.")
-        return {"controller_error": "Controller LLM failed to produce valid structured output or encountered an internal error."}
-
-
-async def executor_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    logger.info("--- Entering Executor Node ---")
-    tool_name = state.get("controller_tool_name")
-    tool_input = state.get("controller_tool_input")
-    task_id = state.get("task_id", "default_task_for_executor")
-    current_step_idx = state["current_step_index"]
-    plan_steps = state.get("plan_steps", [])
-    current_plan_step_desc = plan_steps[current_step_idx].description if plan_steps and current_step_idx < len(plan_steps) else "N/A"
-    attempt_number = state.get("retry_count_for_current_step", 0) + 1
-
-    logger.info(f"Executor Node: Task ID '{task_id}', Step {current_step_idx + 1} ('{current_plan_step_desc}'), Attempt {attempt_number}. Tool: '{tool_name}', Input: '{str(tool_input)[:100]}...'")
-
-    available_tools = get_dynamic_tools(task_id)
-    tool_map = {tool.name: tool for tool in available_tools}
-
-    executor_output: str
-    if tool_name and tool_name != "None":
-        if tool_name in tool_map:
-            selected_tool = tool_map[tool_name]
-            logger.info(f"Executor Node: Executing tool '{tool_name}'")
-            try:
-                if asyncio.iscoroutinefunction(selected_tool.arun):
-                    tool_result = await selected_tool.arun(tool_input, config=config)
-                else: 
-                    tool_result = await asyncio.to_thread(selected_tool.run, tool_input, config=config) 
-                executor_output = str(tool_result)
-                logger.info(f"Executor Node: Tool '{tool_name}' executed. Output length: {len(executor_output)}")
-            except Exception as e:
-                logger.error(f"Executor Node: Error executing tool '{tool_name}': {e}", exc_info=True)
-                executor_output = f"Error executing tool {tool_name}: {type(e).__name__} - {str(e)}"
-                return {"current_executor_output": executor_output, "executor_error_message": executor_output}
-        else:
-            logger.error(f"Executor Node: Tool '{tool_name}' not found in available tools.")
-            executor_output = f"Error: Tool '{tool_name}' not found."
-            return {"current_executor_output": executor_output, "executor_error_message": executor_output}
-    else: 
-        logger.info(f"Executor Node: 'None' tool specified. Executing direct LLM call with input: {str(tool_input)[:100]}...")
-        try:
-            from backend.llm_setup import get_llm 
-            
-            executor_llm_provider = state.get("session_executor_llm_id", settings.executor_default_provider)
-            executor_llm_model = settings.executor_default_model_name 
-            
-            if state.get("session_executor_llm_id"):
-                try:
-                    provider, model = state.get("session_executor_llm_id").split("::",1)
-                    executor_llm_provider = provider
-                    executor_llm_model = model
-                except ValueError:
-                    logger.warning(f"Could not parse session_executor_llm_id: {state.get('session_executor_llm_id')}. Using defaults.")
-
-            direct_llm = get_llm(settings, provider=executor_llm_provider, model_name=executor_llm_model, requested_for_role="EXECUTOR_DirectLLM")
-            
-            prompt_messages = []
-            if state.get("previous_step_executor_output"):
-                prompt_messages.append(HumanMessage(content=f"Context from previous step's output:\n{state['previous_step_executor_output']}"))
-            
-            prompt_messages.append(HumanMessage(content=str(tool_input))) 
-
-            response = await direct_llm.ainvoke(prompt_messages, config=config)
-            executor_output = response.content if hasattr(response, 'content') else str(response)
-            logger.info(f"Executor Node: Direct LLM call completed. Output length: {len(executor_output)}")
-        except Exception as e:
-            logger.error(f"Executor Node: Error during direct LLM call: {e}", exc_info=True)
-            executor_output = f"Error during direct LLM call: {type(e).__name__} - {str(e)}"
-            return {"current_executor_output": executor_output, "executor_error_message": executor_output}
-
-    return {
-        "current_executor_output": executor_output,
-        "messages": [AIMessage(content=f"Executor (Step {current_step_idx + 1}, Attempt {attempt_number}):\nTool: {tool_name or 'None'}\nOutput: {executor_output[:200]}...")]
-    }
-
-
-async def step_evaluator_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    logger.info("--- Entering Step Evaluator Node ---")
-    current_step_idx = state["current_step_index"]
-    plan_steps = state.get("plan_steps", [])
-    task_id = state.get("task_id", "default_task_for_evaluator")
-    attempt_number = state.get("retry_count_for_current_step", 0) + 1 
-
-    if not plan_steps or current_step_idx >= len(plan_steps):
-        logger.error("Step Evaluator Node: No plan steps or index out of bounds.")
-        return {"step_evaluation_error": "No plan steps or index out of bounds."}
-
-    current_plan_step = plan_steps[current_step_idx]
-    logger.info(f"Step Evaluator Node: Evaluating Step {current_step_idx + 1} (Attempt {attempt_number}): {current_plan_step.description}")
-
-    available_tools = get_dynamic_tools(task_id)
-    
-    # --- MODIFIED: Call evaluate_step_outcome_and_suggest_correction with positional arguments ---
-    evaluation_result_model: Optional[StepCorrectionOutcome] = await evaluate_step_outcome_and_suggest_correction(
-        state["user_query"],                                # original_user_query
-        current_plan_step,                                  # plan_step_being_evaluated
-        state.get("controller_tool_name"),                  # controller_tool_used
-        state.get("controller_tool_input"),                 # controller_tool_input
-        state.get("current_executor_output", "No output from executor."), # step_executor_output
-        available_tools,                                    # available_tools
-        state                                               # session_data_entry (passing whole state)
-    )
-    # --- END MODIFIED SECTION ---
-
-
-    if not evaluation_result_model:
-        logger.error("Step Evaluator Node: Failed to get evaluation result from LLM.")
-        return {
-            "step_evaluation_achieved_goal": False,
-            "step_evaluation_assessment": "Evaluator LLM failed to produce an assessment.",
-            "step_evaluation_is_recoverable": False, 
-            "step_evaluation_error": "Evaluator LLM failed.",
-            "messages": [AIMessage(content=f"Step Evaluator (Step {current_step_idx + 1}, Attempt {attempt_number}):\n  Error: Evaluation LLM failed.")]
+            "step_evaluator_output": eval_output,
+            "previous_step_executor_output": None,
+            "accumulated_plan_summary": new_accumulated_summary + f"Step {current_idx + 1} Failed Assessment: {eval_output['assessment_of_step']}\n"
         }
 
-    logger.info(f"Evaluator (Step): Achieved: {evaluation_result_model.step_achieved_goal}, Recoverable: {evaluation_result_model.is_recoverable_via_retry}, Assessment: {evaluation_result_model.assessment_of_step[:100]}...")
-
-    patch: Dict[str, Any] = {
-        "step_evaluation_achieved_goal": evaluation_result_model.step_achieved_goal,
-        "step_evaluation_assessment": evaluation_result_model.assessment_of_step,
-        "step_evaluation_is_recoverable": evaluation_result_model.is_recoverable_via_retry,
-        "step_evaluation_suggested_tool": evaluation_result_model.suggested_new_tool_for_retry,
-        "step_evaluation_suggested_input_instructions": evaluation_result_model.suggested_new_input_instructions_for_retry,
-        "step_evaluation_confidence_in_correction": evaluation_result_model.confidence_in_correction,
-        "messages": [AIMessage(content=f"Step Evaluator (Step {current_step_idx + 1}, Attempt {attempt_number}):\n  Achieved Goal: {evaluation_result_model.step_achieved_goal}\n  Assessment: {evaluation_result_model.assessment_of_step[:150]}...")]
-    }
-
-    if evaluation_result_model.step_achieved_goal:
-        logger.info(f"Step Evaluator: Step {current_step_idx + 1} successful. Preparing for next step {current_step_idx + 2}.")
-        patch["current_step_index"] = current_step_idx + 1
-        patch["previous_step_executor_output"] = state.get("current_executor_output") 
-        patch["retry_count_for_current_step"] = 0 
+async def placeholder_overall_evaluator_node(state: ResearchAgentState) -> Dict[str, Any]:
+    logger.info(">>> NODE: Overall Evaluator (Placeholder)")
+    final_assessment = state.get("overall_evaluator_output", {}).get("assessment", "Placeholder: Plan execution finished.")
+    if state.get("overall_evaluator_output", {}).get("is_direct_qa"):
+        logger.info(f"Overall evaluation for Direct QA: {final_assessment}")
     else:
-        logger.warning(f"Step Evaluator: Step {current_step_idx + 1} (Attempt {attempt_number}) failed.")
-        current_retry_count_for_this_step_before_this_attempt = state.get("retry_count_for_current_step", 0)
-        patch["retry_count_for_current_step"] = current_retry_count_for_this_step_before_this_attempt + 1
-        patch["previous_step_executor_output"] = None 
+        logger.info(f"Overall evaluation for Plan: {final_assessment}")
+        logger.info(f"Accumulated Plan Summary for Eval:\n{state.get('accumulated_plan_summary')}")
+    return {"overall_evaluator_output": {"assessment": final_assessment, "overall_success": True}}
 
-        if evaluation_result_model.is_recoverable_via_retry:
-            logger.info(f"  Step Evaluator: Preparing for retry attempt {patch['retry_count_for_current_step']} for step {current_step_idx + 1}.")
-        else:
-            logger.warning(f"  Step Evaluator: Step {current_step_idx + 1} failed and is not recoverable.")
-
-    return patch
-
-
-async def overall_evaluator_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    logger.info("--- Entering Overall Evaluator Node ---")
-    user_query = state["user_query"]
-    plan_summary = state.get("plan_summary", "N/A")
-    plan_steps = state.get("plan_steps", [])
-    
-    executed_plan_summary_str = f"Plan Summary: {plan_summary}\n"
-    if plan_steps:
-        executed_plan_summary_str += "Steps Attempted:\n"
-        for i, step in enumerate(plan_steps):
-            executed_plan_summary_str += f"  {i+1}. {step.description}\n"
-            if i == state["current_step_index"] -1 : 
-                 executed_plan_summary_str += f"    Last Status: {'Successful' if state.get('step_evaluation_achieved_goal') else 'Failed'}. Assessment: {state.get('step_evaluation_assessment', 'N/A')}\n"
-
-    final_agent_answer_for_eval = state.get("current_executor_output") 
-    if state.get("executor_error_message"):
-        final_agent_answer_for_eval = f"Execution failed with error: {state.get('executor_error_message')}"
-    elif state.get("step_evaluation_error"):
-         final_agent_answer_for_eval = f"Step evaluation failed: {state.get('step_evaluation_error')}"
-    elif not state.get("step_evaluation_achieved_goal") and state.get("step_evaluation_assessment"):
-        final_agent_answer_for_eval = f"Last step failed. Assessment: {state.get('step_evaluation_assessment')}"
-    elif not final_agent_answer_for_eval: 
-        final_agent_answer_for_eval = state.get("step_evaluation_assessment", "Plan concluded without a specific final output from the last step.")
-
-    logger.info(f"Overall Evaluator: Evaluating plan for query: '{user_query[:100]}...' ")
-    logger.debug(f"Overall Evaluator: Plan Summary for Eval: {executed_plan_summary_str[:300]}...")
-    logger.debug(f"Overall Evaluator: Final Answer for Eval: {str(final_agent_answer_for_eval)[:300]}...")
-
-    overall_eval_result: Optional[EvaluationResult] = await evaluate_plan_outcome(
-        original_user_query=user_query,
-        executed_plan_summary=executed_plan_summary_str,
-        final_agent_answer=str(final_agent_answer_for_eval), 
-        session_data_entry=state 
-    )
-
-    if overall_eval_result:
-        logger.info(f"Evaluator (Overall): Success: {overall_eval_result.overall_success}, Assessment: '{overall_eval_result.assessment}'")
-        return {
-            "overall_evaluation_success": overall_eval_result.overall_success,
-            "overall_evaluation_assessment": overall_eval_result.assessment,
-            "overall_evaluation_final_answer_content": overall_eval_result.assessment, 
-            "overall_evaluation_suggestions_for_replan": overall_eval_result.suggestions_for_replan,
-            "messages": [AIMessage(content=f"Overall Plan Evaluation:\n  Success: {overall_eval_result.overall_success}\n  Assessment: {overall_eval_result.assessment}")]
-        }
-    else:
-        logger.error("Overall Evaluator Node: Failed to get evaluation result from LLM.")
-        final_assessment = "Overall evaluation failed to produce a result. Plan outcome uncertain."
-        return {
-            "overall_evaluation_success": False, 
-            "overall_evaluation_assessment": final_assessment,
-            "overall_evaluation_final_answer_content": final_assessment,
-            "overall_evaluation_error": "Overall Evaluator LLM failed.",
-            "messages": [AIMessage(content=f"Overall Plan Evaluation:\n  Error: Evaluation LLM failed.")]
-        }
-
-# --- Conditional Edges ---
-
-def should_plan(state: ResearchAgentState) -> str:
-    logger.info("--- Routing Decision: Should Plan? ---")
-    actual_intent = state.get("classified_intent")
-    
-    if actual_intent == "PLAN":
-        logger.info("Routing: Intent is PLAN, proceeding to planner.")
+# --- Conditional Edge Logic ---
+def should_proceed_to_plan_or_qa(state: ResearchAgentState) -> str:
+    logger.info("--- DECISION: Plan or Direct QA? ---")
+    intent = state.get("classified_intent")
+    if intent == "PLAN":
+        logger.info(f"Intent is '{intent}', proceeding to Planner.")
         return "planner"
-    else: 
-        logger.info(f"Routing: Intent is '{actual_intent}' (NOT PLAN), proceeding to overall_evaluator.")
-        return "overall_evaluator" 
+    elif intent == "DIRECT_QA":
+        logger.info(f"Intent is '{intent}', proceeding to Direct QA.")
+        return "direct_qa"
+    else:
+        logger.warning(f"Unknown intent '{intent}', defaulting to Direct QA.")
+        return "direct_qa"
 
-def should_continue_after_step_eval(state: ResearchAgentState) -> str:
-    logger.info("--- Routing Decision after Step Evaluation ---")
-    step_achieved_goal = state.get("step_evaluation_achieved_goal")
-    is_recoverable = state.get("step_evaluation_is_recoverable")
-    
-    idx_for_next_action = state["current_step_index"] 
-    plan_steps = state.get("plan_steps", [])
-    retry_for_next_attempt = state.get("retry_count_for_current_step", 0)
-    
-    logger.info(f"Router after Step Eval: achieved_goal={step_achieved_goal}, is_recoverable={is_recoverable}, idx_for_next_action={idx_for_next_action}, plan_len={len(plan_steps)}, retry_for_next_attempt={retry_for_next_attempt}")
+# MODIFIED: Merged has_more_steps_in_plan logic into this function
+def should_retry_step_or_proceed(state: ResearchAgentState) -> str:
+    logger.info("--- DECISION: Step Outcome - Retry, Next Step, or Evaluate Overall? ---")
+    step_eval = state.get("step_evaluator_output", {})
+    current_retries = state.get("retry_count_for_current_step", 0)
+    max_retries = settings.agent_max_step_retries
 
-    if step_achieved_goal:
-        if idx_for_next_action < len(plan_steps):
-            logger.info(f"Routing: Step successful. Proceeding to Controller for next step: {idx_for_next_action + 1} (index {idx_for_next_action})")
-            return "controller" 
+    if not step_eval.get("step_achieved_goal", False):  # Step failed
+        if step_eval.get("is_recoverable_via_retry", False) and current_retries < max_retries:
+            logger.info(f"Step failed but is recoverable. Will attempt retry {current_retries + 1} of {max_retries}.")
+            return "retry_step"  # This will lead to increment_retry_count_node
         else:
-            logger.info(f"Routing: All plan steps completed successfully. Index {idx_for_next_action} >= Plan length {len(plan_steps)}. Proceeding to Overall Evaluator.")
-            return "overall_evaluator"
-    else: 
-        assessment = state.get('step_evaluation_assessment', 'Unknown failure reason.')
-        logger.warning(f"Routing: Step (index {idx_for_next_action}) failed. Assessment: {assessment}") 
+            logger.info("Step failed and is not recoverable or retries exhausted. Proceeding to overall plan evaluation.")
+            return "evaluate_overall_plan"
+    else:  # Step succeeded
+        logger.info("Step succeeded. Checking for more steps in the plan.")
+        plan = state.get("plan_steps", [])
+        current_idx = state.get("current_step_index", -1)  # current_step_index is 0-based
         
-        if is_recoverable and retry_for_next_attempt <= MAX_STEP_RETRIES:
-            logger.info(f"Routing: Step failed, but is recoverable. Proceeding to Controller for retry attempt {retry_for_next_attempt} of step {idx_for_next_action + 1}.")
-            return "controller" 
+        if current_idx + 1 < len(plan):  # If there's a next step
+            logger.info(f"More steps exist. Will proceed to step {current_idx + 2} (index {current_idx + 1}).")
+            return "next_step"  # This will lead to advance_to_next_step_node
         else:
-            if not is_recoverable:
-                logger.warning(f"Routing: Step failed and is not recoverable. Proceeding to Overall Evaluator.")
-            else: 
-                logger.warning(f"Routing: Step failed and retries exhausted ({retry_for_next_attempt-1} >= {MAX_STEP_RETRIES}). Proceeding to Overall Evaluator.") 
-            return "overall_evaluator"
+            logger.info("No more steps in plan. Proceeding to overall plan evaluation.")
+            return "evaluate_overall_plan"
 
-# --- Build the Graph ---
-def create_research_agent_graph() -> StateGraph:
+# REMOVED: has_more_steps_in_plan function (its logic is now in should_retry_step_or_proceed)
+
+# --- Utility nodes for state updates before looping ---
+def increment_retry_count_node(state: ResearchAgentState) -> Dict[str, Any]:
+    logger.info(">>> UTILITY NODE: Incrementing Retry Count")
+    current_retries = state.get("retry_count_for_current_step", 0)
+    return {"retry_count_for_current_step": current_retries + 1}
+
+def advance_to_next_step_node(state: ResearchAgentState) -> Dict[str, Any]:
+    logger.info(">>> UTILITY NODE: Advancing to Next Step")
+    current_idx = state.get("current_step_index", -1)
+    return {
+        "current_step_index": current_idx + 1,
+        "retry_count_for_current_step": 0, 
+    }
+
+# backend/langgraph_agent.py (Part 2/2)
+# (Continued from Part 1)
+import asyncio # For the __main__ test block
+
+# --- Graph Definition Function ---
+def create_research_agent_graph():
+    """
+    Builds and compiles the LangGraph research agent.
+    This version uses placeholder node functions and corrected edge logic.
+    """
+    logger.info("Building Research Agent Graph with placeholder nodes...")
     workflow = StateGraph(ResearchAgentState)
-    workflow.add_node("intent_classifier", intent_classifier_node)
-    workflow.add_node("planner", planner_node)
-    workflow.add_node("controller", controller_node)
-    workflow.add_node("executor", executor_node)
-    workflow.add_node("step_evaluator", step_evaluator_node)
-    workflow.add_node("overall_evaluator", overall_evaluator_node)
+
+    # Add Nodes using the placeholder functions defined in Part 1
+    workflow.add_node("intent_classifier", placeholder_intent_classifier_node)
+    workflow.add_node("direct_qa", placeholder_direct_qa_node)
+    workflow.add_node("planner", placeholder_planner_node)
+    workflow.add_node("controller", placeholder_controller_node)
+    workflow.add_node("executor", placeholder_executor_node)
+    workflow.add_node("step_evaluator", placeholder_step_evaluator_node)
+    workflow.add_node("overall_evaluator", placeholder_overall_evaluator_node)
+    
+    # Utility nodes for state updates
+    workflow.add_node("increment_retry_count", increment_retry_count_node)
+    workflow.add_node("advance_to_next_step", advance_to_next_step_node)
+
+    # --- Define Edges ---
     workflow.set_entry_point("intent_classifier")
+
+    # From Intent Classifier
     workflow.add_conditional_edges(
         "intent_classifier",
-        should_plan,
-        {"planner": "planner", "overall_evaluator": "overall_evaluator"}
+        should_proceed_to_plan_or_qa, # Defined in Part 1
+        {
+            "planner": "planner",
+            "direct_qa": "direct_qa"
+        }
     )
-    workflow.add_edge("planner", "controller")
+
+    # Path for Direct QA
+    workflow.add_edge("direct_qa", "overall_evaluator") 
+
+    # Path for Planning
+    workflow.add_edge("planner", "controller") 
+
+    # Main P-C-E-E loop
     workflow.add_edge("controller", "executor")
     workflow.add_edge("executor", "step_evaluator")
+
+    # MODIFIED: Conditional logic after step evaluation
     workflow.add_conditional_edges(
         "step_evaluator",
-        should_continue_after_step_eval,
-        {"controller": "controller", "overall_evaluator": "overall_evaluator"}
+        should_retry_step_or_proceed, # This function now handles all outcomes
+        {
+            "retry_step": "increment_retry_count",    # Leads to utility node then back to controller
+            "next_step": "advance_to_next_step",     # Leads to utility node then back to controller
+            "evaluate_overall_plan": "overall_evaluator" # Step failed definitively or plan finished
+        }
     )
+    
+    # Edge from utility node for incrementing retry count back to controller
+    workflow.add_edge("increment_retry_count", "controller")
+
+    # Edge from utility node for advancing step index back to controller
+    workflow.add_edge("advance_to_next_step", "controller")
+
+    # REMOVED: The problematic second conditional_edges call that started from "check_for_more_steps"
+
+    # Final evaluation leads to END
     workflow.add_edge("overall_evaluator", END)
-    research_agent_graph = workflow.compile()
-    logger.info("ResearchAgent LangGraph compiled successfully with Overall Evaluator and full loop logic.")
-    return research_agent_graph
 
-# --- Main Test Execution (Example) ---
-async def run_graph_example(query: str, task_id_override: Optional[str] = None):
-    research_agent_graph = create_research_agent_graph()
-    current_task_id = task_id_override if task_id_override else f"test_task_for_overall_eval"
-    get_task_workspace_path(current_task_id, create_if_not_exists=True)
+    logger.info("Compiling Research Agent Graph...")
+    app = workflow.compile()
+    logger.info("Research Agent Graph (with placeholders and corrected edges) compiled successfully.")
+    return app
 
-    initial_state: ResearchAgentState = {
-        "user_query": query, "messages": [HumanMessage(content=query)], "task_id": current_task_id,
-        "classified_intent": None, "intent_classifier_reasoning": None, "plan_summary": None,
-        "plan_steps": None, "plan_generation_error": None, "current_step_index": 0,
-        "previous_step_executor_output": None, "retry_count_for_current_step": 0,
-        "controller_tool_name": None, "controller_tool_input": None, "controller_reasoning": None,
-        "controller_confidence": None, "controller_error": None, "current_executor_output": None,
-        "executor_error_message": None, "step_evaluation_achieved_goal": None,
-        "step_evaluation_assessment": None, "step_evaluation_is_recoverable": None,
-        "step_evaluation_suggested_tool": None, "step_evaluation_suggested_input_instructions": None,
-        "step_evaluation_confidence_in_correction": None, "step_evaluation_error": None,
-        "overall_evaluation_success": None, "overall_evaluation_assessment": None,
-        "overall_evaluation_final_answer_content": None, "overall_evaluation_suggestions_for_replan": None,
-        "overall_evaluation_error": None, "error_message": None,
-        "session_intent_classifier_llm_id": None, "session_planner_llm_id": None,
-        "session_controller_llm_id": None, "session_executor_llm_id": None,
-        "session_evaluator_llm_id": None,
-    }
-    config_for_run = RunnableConfig(configurable={"thread_id": f"test_run_{uuid4()}"})
+# --- Create and export the compiled graph instance ---
+research_agent_graph = create_research_agent_graph()
+logger.info(f"Module-level variable 'research_agent_graph' (compiled graph app) created. Type: {type(research_agent_graph)}")
 
-    logger.info(f"Streaming LangGraph execution for query: '{query}'")
-    final_state = None
-    async for chunk in research_agent_graph.astream(initial_state, config=config_for_run):
-        logger.info("--- Graph Stream Chunk ---")
-        for key, value in chunk.items():
-            logger.info(f"State after Node '{key}':")
-            node_state = value 
-            for k, v in node_state.items():
-                if isinstance(v, list) and len(v) > 3 and k != "messages": 
-                    logger.info(f"    {k.replace('_', ' ').title()}: List with {len(v)} items (first 3 shown)...")
-                    for i, item in enumerate(v[:3]): logger.info(f"        Item {i}: {str(item)[:100]}...")
-                elif isinstance(v, str) and len(v) > 150: logger.info(f"    {k.replace('_', ' ').title()}: {v[:150]}...")
-                elif v is not None : logger.info(f"    {k.replace('_', ' ').title()}: {v}")
-            final_state = value 
-    logger.info("--- End of Graph Stream ---")
-    if final_state:
-        logger.info("--- Final Accumulated Graph State ---")
-        for key, value in final_state.items():
-            if isinstance(value, list) and len(value) > 3 and key != "messages":
-                 logger.info(f"{key.replace('_', ' ').title()}: List with {len(value)} items (first 3 shown)...")
-                 for i, item_in_list in enumerate(value[:3]): logger.info(f"    Item {i}: {str(item_in_list)[:100]}...")
-            elif isinstance(value, str) and len(value) > 200 and key != "user_query": 
-                 logger.info(f"{key.replace('_', ' ').title()}: {value[:200]}...")
-            else: logger.info(f"{key.replace('_', ' ').title()}: {value}")
-    return final_state
 
-async def run_main_test():
-    test_query_python_repl_retry = "Use the Python REPL tool to obtain the literal string 'Python is fun!' (including the single quotes). Then, write this exact string to a file named 'python_quote.txt'."
-    print(f"\n--- Running LangGraph Test (PCEE Retry Test) for: '{test_query_python_repl_retry}' ---")
-    final_state_repl = await run_graph_example(test_query_python_repl_retry, task_id_override="test_task_repl_retry_002")
-    if final_state_repl:
-        print(f"\n--- Test Run Complete (PCEE Retry Test) ---")
-        print(f"Overall Evaluation Success: {final_state_repl.get('overall_evaluation_success')}")
-        print(f"Overall Evaluation Assessment: {final_state_repl.get('overall_evaluation_assessment')}")
-        print(f"Final number of messages: {len(final_state_repl.get('messages', []))}")
-    else:
-        print("\n--- Test Run Failed (Python REPL Retry Query) ---")
-
+# Example of how to run (for testing within this file if needed)
 if __name__ == "__main__":
-    asyncio.run(run_main_test())
+    logging.basicConfig(
+        level=logging.INFO, 
+        format='%(asctime)s - %(levelname)s - %(name)s [%(module)s.%(funcName)s:%(lineno)d] - %(message)s'
+    )
+    logger.info("Running langgraph_agent.py directly for testing graph compilation and structure.")
+    
+    # (Optional test invocation code can go here if needed)
+
+    logger.info("langgraph_agent.py (Part 2) finished execution if run as __main__.")
