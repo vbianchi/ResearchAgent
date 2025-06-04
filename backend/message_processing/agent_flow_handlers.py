@@ -18,9 +18,9 @@ from langchain_core.tools import BaseTool
 from backend.config import settings
 from backend.llm_setup import get_llm
 from backend.tools import get_dynamic_tools, get_task_workspace_path
-from backend.planner import generate_plan, PlanStep
+from backend.planner import generate_plan, PlanStep # PlanStep might still be used by generate_plan
 from backend.callbacks import AgentCancelledException
-from backend.intent_classifier import classify_intent # Corrected import
+from backend.intent_classifier import classify_intent
 from backend.langgraph_agent import research_agent_graph, ResearchAgentState
 
 logger = logging.getLogger(__name__)
@@ -118,9 +118,7 @@ async def process_user_message(
     dynamic_tools = get_dynamic_tools(active_task_id)
     tools_summary_for_intent = "\n".join([f"- {tool.name}: {tool.description.split('.')[0]}" for tool in dynamic_tools])
 
-    # MODIFIED: Pass session_data_entry to classify_intent
     classified_intent_value = await classify_intent(user_input_content, session_data_entry, tools_summary_for_intent)
-    # This log should now show just "DIRECT_QA" or "PLAN" if classify_intent is fixed
     await add_monitor_log_func(f"Intent classified as: {classified_intent_value}", "system_intent_classified")
 
 
@@ -128,7 +126,7 @@ async def process_user_message(
         await send_ws_message_func("agent_thinking_update", {"status": "Generating plan..."})
         human_plan_summary, structured_plan_steps = await generate_plan(
             user_query=user_input_content,
-            session_data_entry=session_data_entry, # Pass session data for LLM selection in planner
+            session_data_entry=session_data_entry,
             available_tools_summary=tools_summary_for_intent
         )
         if human_plan_summary and structured_plan_steps:
@@ -154,24 +152,23 @@ async def process_user_message(
         await send_ws_message_func("agent_thinking_update", {"status": "Processing directly (LangGraph)..."})
         await add_monitor_log_func(f"Handling as DIRECT_QA with LangGraph.", "system_direct_qa")
 
+        # MODIFIED: Removed .dict() as ResearchAgentState is a TypedDict and already a dictionary
         initial_graph_input_dict = ResearchAgentState(
             user_query=user_input_content,
-            classified_intent="DIRECT_QA", # Set the correctly classified intent string
+            classified_intent="DIRECT_QA",
             current_task_id=active_task_id,
             chat_history=session_data_entry["memory"].chat_memory.messages,
             plan_steps=[],
             current_step_index=0,
             retry_count_for_current_step=0,
             accumulated_plan_summary=""
-        ).dict()
+        )
 
         session_data_entry["callback_handler"].set_task_id(active_task_id)
         
         configurable_fields = {
             "task_id": active_task_id,
             "session_id": session_id,
-            # Pass LLM overrides for nodes that might use them from config
-            # Ensure keys match how graph nodes expect them (e.g., from with_config)
             "intent_classifier_llm_id": session_data_entry.get("session_intent_classifier_llm_id"),
             "planner_llm_id": session_data_entry.get("session_planner_llm_id"),
             "controller_llm_id": session_data_entry.get("session_controller_llm_id"),
@@ -180,18 +177,17 @@ async def process_user_message(
         }
         filtered_configurable_fields = {k: v for k, v in configurable_fields.items() if v is not None}
 
-
         runnable_config = RunnableConfig(
             callbacks=[session_data_entry["callback_handler"]],
             configurable=filtered_configurable_fields
         )
 
-        logger.info(f"[{session_id}] Invoking research_agent_graph.astream_events for DIRECT_QA. Config: {filtered_configurable_fields}")
+        logger.info(f"[{session_id}] Invoking research_agent_graph.astream_events for DIRECT_QA. Input: {initial_graph_input_dict}, Config: {filtered_configurable_fields}")
 
         async def graph_streaming_task_direct_qa():
             try:
                 async for event in research_agent_lg_graph.astream_events(
-                    initial_graph_input_dict,
+                    initial_graph_input_dict, # Pass the dictionary directly
                     config=runnable_config,
                     version="v1"
                 ):
@@ -214,14 +210,13 @@ async def process_user_message(
 
         current_graph_task = asyncio.create_task(graph_streaming_task_direct_qa())
         connected_clients_entry["agent_task"] = current_graph_task
-    else: # Fallback if intent is not "PLAN" or "DIRECT_QA" after classify_intent returns
+    else: 
         logger.error(f"[{session_id}] Fallback: classify_intent returned '{classified_intent_value}', which is not 'PLAN' or 'DIRECT_QA'. Defaulting to planning.")
         await add_monitor_log_func(f"Error: classify_intent returned unknown value '{classified_intent_value}'. Defaulting to PLAN.", "error_system")
-        # ... (rest of fallback planning logic from previous version) ...
         await send_ws_message_func("agent_thinking_update", {"status": "Generating plan (fallback)..."})
         human_plan_summary, structured_plan_steps = await generate_plan(
             user_query=user_input_content, 
-            session_data_entry=session_data_entry, # Pass session data
+            session_data_entry=session_data_entry,
             available_tools_summary=tools_summary_for_intent
         )
         if human_plan_summary and structured_plan_steps:
