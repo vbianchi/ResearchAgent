@@ -18,7 +18,7 @@ from langchain_core.tools import BaseTool
 from backend.config import settings
 from backend.llm_setup import get_llm
 from backend.tools import get_dynamic_tools, get_task_workspace_path
-from backend.planner import generate_plan, PlanStep # PlanStep might still be used by generate_plan
+from backend.planner import generate_plan, PlanStep
 from backend.callbacks import AgentCancelledException
 from backend.intent_classifier import classify_intent
 from backend.langgraph_agent import research_agent_graph, ResearchAgentState
@@ -37,7 +37,7 @@ async def _update_plan_file_step_status(
     step_number: int,
     status_char: str
 ) -> None:
-    """Helper to update a step's status in the plan Markdown file."""
+    # ... (function content remains the same) ...
     if not plan_filename:
         logger.warning("Cannot update plan file: no active plan filename.")
         return
@@ -121,6 +121,19 @@ async def process_user_message(
     classified_intent_value = await classify_intent(user_input_content, session_data_entry, tools_summary_for_intent)
     await add_monitor_log_func(f"Intent classified as: {classified_intent_value}", "system_intent_classified")
 
+    # Prepare LLM ID overrides from session_data_entry to be passed into the graph's initial state
+    # These will be picked up by the intent_classifier_node (or other nodes as needed)
+    # to make decisions or select appropriate LLMs.
+    initial_llm_ids_for_state = {
+        "intent_classifier_llm_id": session_data_entry.get("session_intent_classifier_llm_id"),
+        "planner_llm_id": session_data_entry.get("session_planner_llm_id"),
+        "controller_llm_id": session_data_entry.get("session_controller_llm_id"),
+        "executor_llm_id": f"{session_data_entry.get('selected_llm_provider', settings.executor_default_provider)}::{session_data_entry.get('selected_llm_model_name', settings.executor_default_model_name)}",
+        "evaluator_llm_id": session_data_entry.get("session_evaluator_llm_id"),
+    }
+    # Filter out None values as ResearchAgentState fields are Optional
+    filtered_initial_llm_ids = {k: v for k,v in initial_llm_ids_for_state.items() if v is not None}
+
 
     if classified_intent_value == "PLAN":
         await send_ws_message_func("agent_thinking_update", {"status": "Generating plan..."})
@@ -132,8 +145,7 @@ async def process_user_message(
         if human_plan_summary and structured_plan_steps:
             session_data_entry["current_plan_human_summary"] = human_plan_summary
             session_data_entry["current_plan_structured"] = structured_plan_steps
-            session_data_entry["current_plan_step_index"] = 0
-            session_data_entry["plan_execution_active"] = False
+            # ... (rest of plan confirmation logic)
             await send_ws_message_func("display_plan_for_confirmation", {
                 "human_summary": human_plan_summary,
                 "structured_plan": structured_plan_steps
@@ -142,17 +154,18 @@ async def process_user_message(
             await send_ws_message_func("status_message", "Plan generated. Please review and confirm.")
             await send_ws_message_func("agent_thinking_update", {"status": "Awaiting plan confirmation..."})
         else:
+            # ... (plan generation failure logic) ...
             logger.error(f"[{session_id}] Failed to generate a plan for query: {user_input_content}")
             await add_monitor_log_func(f"Error: Failed to generate a plan.", "error_system")
             await send_ws_message_func("status_message", "Error: Could not generate a plan for your request.")
             await send_ws_message_func("agent_message", "I'm sorry, I couldn't create a plan for that request. Please try rephrasing or breaking it down.")
             await send_ws_message_func("agent_thinking_update", {"status": "Planning failed."})
 
+
     elif classified_intent_value == "DIRECT_QA":
         await send_ws_message_func("agent_thinking_update", {"status": "Processing directly (LangGraph)..."})
         await add_monitor_log_func(f"Handling as DIRECT_QA with LangGraph.", "system_direct_qa")
 
-        # MODIFIED: Removed .dict() as ResearchAgentState is a TypedDict and already a dictionary
         initial_graph_input_dict = ResearchAgentState(
             user_query=user_input_content,
             classified_intent="DIRECT_QA",
@@ -161,45 +174,57 @@ async def process_user_message(
             plan_steps=[],
             current_step_index=0,
             retry_count_for_current_step=0,
-            accumulated_plan_summary=""
+            accumulated_plan_summary="",
+            **filtered_initial_llm_ids # Pass LLM IDs into initial state
         )
 
         session_data_entry["callback_handler"].set_task_id(active_task_id)
         
-        configurable_fields = {
-            "task_id": active_task_id,
-            "session_id": session_id,
-            "intent_classifier_llm_id": session_data_entry.get("session_intent_classifier_llm_id"),
-            "planner_llm_id": session_data_entry.get("session_planner_llm_id"),
-            "controller_llm_id": session_data_entry.get("session_controller_llm_id"),
-            "evaluator_llm_id": session_data_entry.get("session_evaluator_llm_id"),
-            "executor_llm_id": f"{session_data_entry.get('selected_llm_provider', settings.executor_default_provider)}::{session_data_entry.get('selected_llm_model_name', settings.executor_default_model_name)}",
+        # Configurable fields for RunnableConfig should primarily be for runtime parameters
+        # that are not part of the primary state definition, or for overriding specific
+        # aspects of the graph if it's designed to accept them this way.
+        # LLM choices are now primarily driven by the state.
+        configurable_fields_for_run = {
+            "task_id": active_task_id, # Good to have for logging/context within graph execution
+            "session_id": session_id,   # Good to have for logging/context
+            # We can still pass LLM IDs here if some nodes are specifically designed
+            # to pick them from `config.configurable` instead of state.
+            # For consistency, if nodes use state for LLM IDs, then this might be redundant.
+            # Let's assume for now state is the primary source for nodes,
+            # and these are for broader config.
+            **filtered_initial_llm_ids # Also pass here, nodes can decide to use state or config
         }
-        filtered_configurable_fields = {k: v for k, v in configurable_fields.items() if v is not None}
 
         runnable_config = RunnableConfig(
             callbacks=[session_data_entry["callback_handler"]],
-            configurable=filtered_configurable_fields
+            configurable=configurable_fields_for_run # Pass the combined config
         )
 
-        logger.info(f"[{session_id}] Invoking research_agent_graph.astream_events for DIRECT_QA. Input: {initial_graph_input_dict}, Config: {filtered_configurable_fields}")
+        logger.info(f"[{session_id}] Invoking research_agent_graph.astream_events for DIRECT_QA. Input State (partial): user_query='{user_input_content}', classified_intent='DIRECT_QA'. Config: {runnable_config.get('configurable')}")
+
 
         async def graph_streaming_task_direct_qa():
+            # REMOVED: final_answer_sent_from_direct_qa flag and manual send logic
+            # The WebSocketCallbackHandler should now pick up the AIMessage from OverallEvaluatorNode
             try:
                 async for event in research_agent_lg_graph.astream_events(
-                    initial_graph_input_dict, # Pass the dictionary directly
+                    initial_graph_input_dict,
                     config=runnable_config,
                     version="v1"
                 ):
-                    event_name = event.get("name", "graph")
-                    logger.debug(f"[{session_id}] Graph Event: {event['event']} for Node: {event_name}, Tags: {event.get('tags')}")
-                    if event["event"] == "on_chain_end" and event.get("name") == "ResearchAgentGraph":
+                    event_node_name = event.get("name", "graph")
+                    logger.debug(f"[{session_id}] Graph Event: {event['event']} for Node: {event_node_name}, Tags: {event.get('tags')}")
+                    # The callback handler is responsible for sending messages based on LLM events
+                    if event["event"] == "on_chain_end" and event_node_name == "ResearchAgentGraph": # Graph name
                         logger.info(f"[{session_id}] LangGraph stream finished for DIRECT_QA.")
+            
             except AgentCancelledException:
+                # ... (cancellation logic remains the same) ...
                 logger.warning(f"[{session_id}] DIRECT_QA execution cancelled by user (LangGraph).")
                 await send_ws_message_func("status_message", "Direct QA cancelled.")
                 await add_monitor_log_func("Direct QA cancelled by user (LangGraph).", "system_cancel")
             except Exception as e:
+                # ... (error handling remains the same) ...
                 logger.error(f"[{session_id}] Error during DIRECT_QA execution (LangGraph): {e}", exc_info=True)
                 await add_monitor_log_func(f"Error during Direct QA (LangGraph): {e}", "error_direct_qa")
                 await send_ws_message_func("agent_message", f"Sorry, I encountered an error trying to answer directly: {e}")
@@ -211,6 +236,7 @@ async def process_user_message(
         current_graph_task = asyncio.create_task(graph_streaming_task_direct_qa())
         connected_clients_entry["agent_task"] = current_graph_task
     else: 
+        # ... (fallback logic remains the same) ...
         logger.error(f"[{session_id}] Fallback: classify_intent returned '{classified_intent_value}', which is not 'PLAN' or 'DIRECT_QA'. Defaulting to planning.")
         await add_monitor_log_func(f"Error: classify_intent returned unknown value '{classified_intent_value}'. Defaulting to PLAN.", "error_system")
         await send_ws_message_func("agent_thinking_update", {"status": "Generating plan (fallback)..."})
@@ -246,6 +272,7 @@ async def process_execute_confirmed_plan(
     db_add_message_func: DBAddMessageFunc,
     research_agent_lg_graph: Any
 ) -> None:
+    # ... (function content remains the same - plan execution still pending LangGraph integration) ...
     logger.info(f"[{session_id}] Received 'execute_confirmed_plan'.")
     active_task_id = session_data_entry.get("current_task_id")
     if not active_task_id:
@@ -309,6 +336,7 @@ async def process_cancel_plan_proposal(
     connected_clients_entry: Dict[str, Any], send_ws_message_func: SendWSMessageFunc,
     add_monitor_log_func: AddMonitorLogFunc
 ) -> None:
+    # ... (function content remains the same) ...
     logger.info(f"[{session_id}] Received 'cancel_plan_proposal'.")
     plan_id_to_cancel = data.get("plan_id") 
 
@@ -321,3 +349,4 @@ async def process_cancel_plan_proposal(
     await send_ws_message_func("status_message", "Plan proposal cancelled by user.")
     await send_ws_message_func("agent_message", "Okay, the proposed plan has been cancelled.")
     await send_ws_message_func("agent_thinking_update", {"status": "Idle."})
+

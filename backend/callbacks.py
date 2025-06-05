@@ -1,92 +1,115 @@
 # backend/callbacks.py
 import logging
 import datetime
-from typing import Any, Dict, List, Optional, Union, Sequence, Callable, Coroutine
+from typing import Any, Dict, List, Optional, Union, Sequence, Callable, Coroutine, TYPE_CHECKING
 from uuid import UUID
 import json
+from pathlib import Path
+import os
 import re
-import asyncio # Added for asyncio.sleep
 
 # LangChain Core Imports
 from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_core.outputs import LLMResult, ChatGenerationChunk, GenerationChunk
-from langchain_core.messages import BaseMessage, AIMessageChunk
+from langchain_core.messages import BaseMessage, AIMessageChunk, AIMessage # Ensure AIMessage is imported
 from langchain_core.agents import AgentAction, AgentFinish
 from langchain_core.documents import Document
 
 # Project Imports
 from backend.config import settings
+# from backend.tools import TEXT_EXTENSIONS, get_task_workspace_path # Not directly used in this version of callbacks
+
+if TYPE_CHECKING:
+    from langchain_core.tracers.schemas import Run # For type hinting run_manager if used
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
 
+# --- Define Custom Exception for Cancellation ---
 class AgentCancelledException(Exception):
     """Custom exception to signal agent cancellation via callbacks."""
     pass
+# ---------------------------------------------
 
+# Define type hints
 AddMessageFunc = Callable[[str, str, str, str], Coroutine[Any, Any, None]]
 SendWSMessageFunc = Callable[[str, Any], Coroutine[Any, Any, None]]
 
+
+# --- ADDED: For more structured logging, especially with callback info ---
+# These constants can be used in the component_hint field or similar
+LOG_SOURCE_SYSTEM = "SYSTEM"
 LOG_SOURCE_INTENT_CLASSIFIER = "INTENT_CLASSIFIER"
 LOG_SOURCE_PLANNER = "PLANNER"
 LOG_SOURCE_CONTROLLER = "CONTROLLER"
 LOG_SOURCE_EXECUTOR = "EXECUTOR"
 LOG_SOURCE_EVALUATOR_STEP = "EVALUATOR_STEP"
 LOG_SOURCE_EVALUATOR_OVERALL = "EVALUATOR_OVERALL"
-LOG_SOURCE_TOOL_PREFIX = "TOOL"
-LOG_SOURCE_LLM_CORE = "LLM_CORE"
-LOG_SOURCE_SYSTEM = "SYSTEM"
-LOG_SOURCE_UI_EVENT = "UI_EVENT"
-LOG_SOURCE_WARNING = "WARNING"
-LOG_SOURCE_ERROR = "ERROR"
-LOG_SOURCE_ARTIFACT = "ARTIFACT"
+LOG_SOURCE_TOOL_INTERNAL = "TOOL_INTERNAL_LLM" # e.g., for LLM calls within a tool
+LOG_SOURCE_LLM_CORE = "LLM_CORE" # Generic LLM calls not tied to a specific agent component
+LOG_SOURCE_CALLBACK_HANDLER = "CALLBACK_HANDLER" # For logs originating from this handler itself
 
-SUB_TYPE_BOTTOM_LINE = "bottom_line"
+# --- MODIFIED: Callback log message type constants ---
+# Standard agent output message
+AGENT_MESSAGE_TYPE_FINAL_ANSWER = "agent_message"
+# Agent "thinking" or intermediate status updates
+AGENT_MESSAGE_TYPE_THINKING_UPDATE = "agent_thinking_update"
+# More structured status/progress update from agent components (sub-statuses)
 SUB_TYPE_SUB_STATUS = "sub_status"
+# Agent's internal "thought" process (can be multi-line, Markdown)
 SUB_TYPE_THOUGHT = "thought"
+# Used when a tool's output needs to be displayed directly in chat (e.g., file content)
+SUB_TYPE_TOOL_RESULT_FOR_CHAT = "tool_result_for_chat"
+# Plan step announcements
+AGENT_MESSAGE_TYPE_MAJOR_STEP_ANNOUNCEMENT = "agent_major_step_announcement"
 
-DB_MSG_TYPE_SUB_STATUS = "db_agent_sub_status"
-DB_MSG_TYPE_THOUGHT = "db_agent_thought"
-DB_MSG_TYPE_TOOL_RESULT_FOR_CHAT = "db_tool_result_for_chat"
-
-
-# Tools whose direct output should be sent to chat
-TEXT_OUTPUT_TOOLS_FOR_CHAT: List[str] = [
-    "read_file",
-    "web_page_reader",
-    "pubmed_search",
-    "tavily_search_api",
-    "deep_research_synthesizer",
-    "workspace_shell",
-    "Python_REPL",
-    "playwright_web_search"
-]
-
-# Tools for which a confirmation message (derived from output) should be sent to chat
-CONFIRMATION_ONLY_TOOLS_FOR_CHAT: List[str] = [
-    "write_file",
-    "python_package_installer"
-]
+# Database message types (can mirror some of the above or be more specific)
+DB_MSG_TYPE_USER_INPUT = "user_input"
+DB_MSG_TYPE_AGENT_FINAL_ANSWER = AGENT_MESSAGE_TYPE_FINAL_ANSWER # Align with UI
+DB_MSG_TYPE_SYSTEM_EVENT = "system_event" # Generic system messages
+DB_MSG_TYPE_ERROR = "error_log" # General errors
+DB_MSG_TYPE_LLM_TOKEN_USAGE = "llm_token_usage"
+DB_MSG_TYPE_ARTIFACT_GENERATED = "artifact_generated"
+DB_MSG_TYPE_TOOL_INPUT = "tool_input"
+DB_MSG_TYPE_TOOL_OUTPUT = "tool_output"
+DB_MSG_TYPE_AGENT_THOUGHT_ACTION = "agent_thought_action" # Legacy, from ReAct agent
+DB_MSG_TYPE_MONITOR_LOG_PREFIX = "monitor_" # Generic prefix for monitor logs
+DB_MSG_TYPE_SUB_STATUS = "db_sub_status" # For storing structured sub_status updates
+DB_MSG_TYPE_THOUGHT = "db_thought" # For storing structured thought updates
+DB_MSG_TYPE_TOOL_RESULT_FOR_CHAT = "db_tool_result_for_chat" # For storing tool results sent to chat
+DB_MSG_TYPE_CONFIRMED_PLAN_LOG = "confirmed_plan_log" # To store the confirmed plan
+DB_MSG_TYPE_MAJOR_STEP_ANNOUNCEMENT = "db_major_step_announcement"
 
 
 class WebSocketCallbackHandler(AsyncCallbackHandler):
+    """
+    Async Callback handler for LangChain agent events.
+    - Sends thinking status updates to the chat UI.
+    - Sends final agent messages to the chat UI (adapted for LangGraph).
+    - Sends monitor logs for all steps.
+    - Extracts and sends LLM token usage.
+    - Handles cancellation requests.
+    - Logs artifact creation from write_file and triggers UI refresh (if tool callbacks are re-enabled).
+    - Saves relevant events to the database.
+    """
     always_verbose: bool = True
-    ignore_llm: bool = False
-    ignore_chain: bool = True
-    ignore_agent: bool = False
+    ignore_llm: bool = False 
+    ignore_chain: bool = False 
+    ignore_agent: bool = True 
     ignore_retriever: bool = True
-    ignore_chat_model: bool = False
+    ignore_chat_model: bool = False 
 
     def __init__(self, session_id: str, send_ws_message_func: SendWSMessageFunc, db_add_message_func: AddMessageFunc, session_data_ref: Dict[str, Any]):
         super().__init__()
         self.session_id = session_id
         self.send_ws_message = send_ws_message_func
         self.db_add_message = db_add_message_func
-        self.session_data = session_data_ref
+        self.session_data = session_data_ref 
         self.current_task_id: Optional[str] = None
         self.current_tool_name: Optional[str] = None
-        self.current_agent_role_hint: Optional[str] = None
-        self.current_tool_input_str: Optional[str] = None
+        
+        self.active_langgraph_node_name: Optional[str] = None
+        self.is_final_evaluator_llm_active: bool = False
+
         logger.info(f"[{self.session_id}] WebSocketCallbackHandler initialized.")
 
     def set_task_id(self, task_id: Optional[str]):
@@ -97,374 +120,405 @@ class WebSocketCallbackHandler(AsyncCallbackHandler):
         timestamp = datetime.datetime.now().isoformat(timespec='milliseconds')
         return f"[{timestamp}][{self.session_id[:8]}]"
 
-    async def _save_message_to_db(self, message_type: str, content_data: Any):
+    async def _save_message(self, msg_type: str, content: str):
         if self.current_task_id:
             try:
-                content_str = json.dumps(content_data) if isinstance(content_data, dict) else str(content_data)
-                await self.db_add_message(self.current_task_id, self.session_id, message_type, content_str)
+                await self.db_add_message(self.current_task_id, self.session_id, msg_type, str(content))
             except Exception as e:
-                logger.error(f"[{self.session_id}] Callback DB save error (Task: {self.current_task_id}, Type: {message_type}): {e}", exc_info=True)
+                logger.error(f"[{self.session_id}] Callback DB save error (Task: {self.current_task_id}, Type: {msg_type}): {e}", exc_info=True)
         else:
-            logger.warning(f"[{self.session_id}] Cannot save message type '{message_type}' to DB: current_task_id not set.")
+            logger.warning(f"[{self.session_id}] Cannot save message type '{msg_type}' to DB: current_task_id not set.")
 
-    async def _send_thinking_update(self, message_text: str, status_key: str, component_hint: str, sub_type: str = SUB_TYPE_BOTTOM_LINE, details: Optional[Dict] = None, thought_label: Optional[str] = None):
-        payload = {
-            "status_key": status_key,
-            "message": message_text,
-            "component_hint": component_hint,
-            "sub_type": sub_type,
-        }
-        if details: payload["details"] = details
-        if sub_type == SUB_TYPE_THOUGHT and thought_label:
-            payload["message"] = { "label": thought_label, "content_markdown": message_text }
+    def _check_cancellation(self, step_name: str):
+        # Critical debug log for initial check
+        logger.critical(f"CRITICAL_DEBUG_CANCEL_CHECK: [{self.session_id}] _check_cancellation for '{step_name}' (Initial Check): cancellation_requested flag is currently {self.session_data.get(self.session_id, {}).get('cancellation_requested', False)}")
 
-        await self.send_ws_message("agent_thinking_update", payload)
-
-        if self.current_task_id and (sub_type == SUB_TYPE_SUB_STATUS or sub_type == SUB_TYPE_THOUGHT):
-            db_type = DB_MSG_TYPE_SUB_STATUS if sub_type == SUB_TYPE_SUB_STATUS else DB_MSG_TYPE_THOUGHT
-            db_content = {"message_text": message_text, "component_hint": component_hint} if sub_type == SUB_TYPE_SUB_STATUS \
-                         else {"thought_label": thought_label, "thought_content_markdown": message_text, "component_hint": component_hint}
-            await self._save_message_to_db(db_type, db_content)
-
-    def _check_cancellation(self, step_name: str, check_point: str = "INITIAL"):
-        # Access the session-specific data using self.session_data (which is session_data[session_id])
-        # Ensure self.session_data is correctly referencing the specific session's data dictionary
-        session_specific_data_for_check = self.session_data # In callbacks, self.session_data IS session_data[session_id]
+        if self.session_data and self.session_id in self.session_data:
+            current_session_specific_data = self.session_data[self.session_id]
+            if current_session_specific_data.get('cancellation_requested', False):
+                logger.warning(f"[{self.session_id}] Cancellation detected in callback before {step_name}. Raising AgentCancelledException.")
+                raise AgentCancelledException("Cancellation requested by user.")
+        else:
+            logger.error(f"[{self.session_id}] Cannot check cancellation flag: Session data not found for session in shared dict.")
         
-        cancel_flag_value = False
-        if session_specific_data_for_check and isinstance(session_specific_data_for_check, dict):
-            cancel_flag_value = session_specific_data_for_check.get('cancellation_requested', False)
-        else:
-            # This case should not happen if session_data is managed correctly in server.py
-            logger.error(f"CRITICAL_ERROR_CANCEL_CHECK: [{self.session_id}] _check_cancellation for '{step_name}' ({check_point}): self.session_data is not a dict or is None! Type: {type(session_specific_data_for_check)}")
-            # Potentially raise an error or return, as state is inconsistent
-            return # Avoid proceeding if session data is not as expected
-
-        logger.critical(f"CRITICAL_DEBUG_CANCEL_CHECK: [{self.session_id}] _check_cancellation for '{step_name}' ({check_point}): cancellation_requested flag is currently {cancel_flag_value}")
-
-        if cancel_flag_value: # Use the fetched value
-            logger.critical(f"CRITICAL_DEBUG_CANCEL_RAISE: [{self.session_id}] _check_cancellation: CANCELLATION DETECTED for step '{step_name}' ({check_point}). RAISING AgentCancelledException NOW!")
-            raise AgentCancelledException(f"Cancellation requested by user before {step_name} ({check_point}).")
+        # Critical debug log for post-yield check (simulating a brief pause for context switch)
+        # In a real async scenario, this check might happen after an `await` point.
+        # Since this is a synchronous check method, we log its state if it were to yield.
+        logger.critical(f"CRITICAL_DEBUG_CANCEL_CHECK: [{self.session_id}] _check_cancellation for '{step_name}' (Post-Yield Check): cancellation_requested flag is currently {self.session_data.get(self.session_id, {}).get('cancellation_requested', False)}")
 
 
-    async def on_llm_start(self, serialized: Dict[str, Any], prompts: List[str], **kwargs: Any) -> None:
-        self._check_cancellation("LLM execution", "Initial Check")
-        await asyncio.sleep(0) # Yield control briefly
-        self._check_cancellation("LLM execution", "Post-Yield Check")
+    async def on_llm_start(self, serialized: Dict[str, Any], prompts: List[str], *, run_id: UUID, parent_run_id: Optional[UUID] = None, tags: Optional[List[str]] = None, metadata: Optional[Dict[str, Any]] = None, **kwargs: Any) -> None:
+        try:
+            self._check_cancellation("LLM execution")
+            self.active_langgraph_node_name = None 
+            if tags:
+                for tag in tags:
+                    if tag.startswith("langgraph:node:"):
+                        self.active_langgraph_node_name = tag.split("langgraph:node:", 1)[1]
+                        logger.debug(f"[{self.session_id}] on_llm_start: Active LangGraph node identified from tags: {self.active_langgraph_node_name}")
+                        break
+            if not self.active_langgraph_node_name and metadata and metadata.get("langgraph_node"): 
+                 self.active_langgraph_node_name = metadata.get("langgraph_node")
+                 logger.debug(f"[{self.session_id}] on_llm_start: Active LangGraph node identified from metadata: {self.active_langgraph_node_name}")
 
-        metadata = kwargs.get("metadata", {})
-        self.current_agent_role_hint = metadata.get("component_name", LOG_SOURCE_LLM_CORE)
-        logger.critical(f"CRITICAL_DEBUG: [{self.session_id}] on_llm_start: ENTERED for role_hint: {self.current_agent_role_hint}. Metadata: {metadata}")
+            if self.active_langgraph_node_name == "overall_evaluator": 
+                self.is_final_evaluator_llm_active = True
+                logger.info(f"[{self.session_id}] LLM call started for OverallEvaluatorNode.")
+            else:
+                self.is_final_evaluator_llm_active = False
+            
+            logger.info(
+                f"[{self.session_id}] on_llm_start: Post-determination. "
+                f"Node: '{self.active_langgraph_node_name}', "
+                f"is_final_evaluator_llm_active: {self.is_final_evaluator_llm_active}"
+            )
 
-        component_hint_for_status = self.current_agent_role_hint if self.current_agent_role_hint != LOG_SOURCE_LLM_CORE else "LLM"
-        await self._send_thinking_update(f"Thinking ({component_hint_for_status})...", "LLM_PROCESSING_START", self.current_agent_role_hint, SUB_TYPE_BOTTOM_LINE)
-        prompt_summary = str(prompts)[:200] + "..." if len(str(prompts)) > 200 else str(prompts)
-        await self.send_ws_message("monitor_log", {"text": f"{self._get_log_prefix()} [LLM Core Start] Role: {self.current_agent_role_hint}, Prompts: {prompt_summary}", "log_source": f"{LOG_SOURCE_LLM_CORE}_START_{self.current_agent_role_hint.upper()}"})
+        except AgentCancelledException:
+            raise 
 
+    async def on_chat_model_start(
+        self, serialized: Dict[str, Any], messages: List[List[BaseMessage]], *, run_id: UUID, parent_run_id: Optional[UUID] = None, tags: Optional[List[str]] = None, metadata: Optional[Dict[str, Any]] = None, **kwargs: Any
+    ) -> Any:
+        try:
+            # --- START: MODIFIED SECTION (Added logging) ---
+            self._check_cancellation("Chat Model execution")
+            
+            self.active_langgraph_node_name = None 
+            current_node_name_for_log = "UnknownNode" 
+            if tags:
+                for tag in tags:
+                    if tag.startswith("langgraph:node:"):
+                        self.active_langgraph_node_name = tag.split("langgraph:node:", 1)[1]
+                        current_node_name_for_log = self.active_langgraph_node_name
+                        logger.debug(f"[{self.session_id}] on_chat_model_start: Active LangGraph node identified from tags: {self.active_langgraph_node_name}")
+                        break
+            if not self.active_langgraph_node_name and metadata and metadata.get("langgraph_node"):
+                 self.active_langgraph_node_name = metadata.get("langgraph_node")
+                 current_node_name_for_log = self.active_langgraph_node_name
+                 logger.debug(f"[{self.session_id}] on_chat_model_start: Active LangGraph node identified from metadata: {self.active_langgraph_node_name}")
 
-    async def on_chat_model_start(self, serialized: Dict[str, Any], messages: List[List[BaseMessage]], **kwargs: Any) -> Any:
-        self._check_cancellation("Chat Model execution", "Initial Check")
-        await asyncio.sleep(0) # Yield control briefly
-        self._check_cancellation("Chat Model execution", "Post-Yield Check")
+            if self.active_langgraph_node_name == "overall_evaluator":
+                self.is_final_evaluator_llm_active = True
+                logger.info(f"[{self.session_id}] Chat model call started for OverallEvaluatorNode.")
+            else:
+                self.is_final_evaluator_llm_active = False
+            
+            logger.info(
+                f"[{self.session_id}] on_chat_model_start: Post-determination. "
+                f"Node: '{self.active_langgraph_node_name}', "
+                f"is_final_evaluator_llm_active: {self.is_final_evaluator_llm_active}"
+            )
+            # --- END: MODIFIED SECTION (Added logging) ---
+            
+            # Critical debug log to see metadata
+            role_hint_from_meta = metadata.get("role_hint", "LLM_CORE") if metadata else "LLM_CORE"
+            logger.critical(f"CRITICAL_DEBUG: [{self.session_id}] on_chat_model_start: ENTERED for role_hint: {role_hint_from_meta}. Metadata: {metadata}")
 
-        metadata = kwargs.get("metadata", {})
-        self.current_agent_role_hint = metadata.get("component_name", LOG_SOURCE_LLM_CORE)
-        logger.critical(f"CRITICAL_DEBUG: [{self.session_id}] on_chat_model_start: ENTERED for role_hint: {self.current_agent_role_hint}. Metadata: {metadata}")
+            log_msg_content = f"[Chat Model Start] Role: {role_hint_from_meta}, Node: {self.active_langgraph_node_name or 'N/A'}."
+            await self.send_ws_message("monitor_log", f"{self._get_log_prefix()} {log_msg_content}")
 
-        component_hint_for_status = self.current_agent_role_hint if self.current_agent_role_hint != LOG_SOURCE_LLM_CORE else "ChatModel"
-        await self._send_thinking_update(f"Thinking ({component_hint_for_status})...", "LLM_PROCESSING_START", self.current_agent_role_hint, SUB_TYPE_BOTTOM_LINE)
-        message_summary = str(messages)[:200] + "..." if len(str(messages)) > 200 else str(messages)
-        await self.send_ws_message("monitor_log", {"text": f"{self._get_log_prefix()} [Chat Model Core Start] Role: {self.current_agent_role_hint}, Messages: {message_summary}", "log_source": f"{LOG_SOURCE_LLM_CORE}_START_{self.current_agent_role_hint.upper()}"})
+        except AgentCancelledException:
+            raise 
 
-    async def on_llm_new_token(self, token: str, **kwargs: Any) -> None: pass
+    async def on_llm_new_token(self, token: str, *, chunk: Optional[Union[GenerationChunk, ChatGenerationChunk]] = None, run_id: UUID, parent_run_id: Optional[UUID] = None, **kwargs: Any) -> None:
+        pass
 
     async def on_llm_end(self, response: LLMResult, *, run_id: UUID, parent_run_id: Optional[UUID] = None, **kwargs: Any) -> None:
+        role_hint_from_meta = kwargs.get("metadata", {}).get("role_hint", "LLM_CORE") # Get role hint from kwargs metadata
+        # --- START: MODIFIED SECTION (Added logging) ---
+        logger.info(
+            f"[{self.session_id}] on_llm_end: Entered. "
+            f"Current active_langgraph_node_name (from self): '{self.active_langgraph_node_name}', "
+            f"Current is_final_evaluator_llm_active (from self): {self.is_final_evaluator_llm_active}"
+        )
+        # Critical debug log for role hint
+        logger.critical(f"CRITICAL_DEBUG: [{self.session_id}] on_llm_end: ENTERED for role_hint: {role_hint_from_meta}")
+        # --- END: MODIFIED SECTION (Added logging) ---
+
         log_prefix = self._get_log_prefix()
-        input_tokens: Optional[int] = None
-        output_tokens: Optional[int] = None
-        total_tokens: Optional[int] = None
-        model_name: str = "unknown_model"
-        source_for_tokens = "unknown"
-
-        logger.critical(f"CRITICAL_DEBUG: [{self.session_id}] on_llm_end: ENTERED for role_hint: {self.current_agent_role_hint}")
-        logger.debug(f"[{self.session_id}] on_llm_end (Role: {self.current_agent_role_hint}): Full response object type: {type(response)}")
-
-        if response.llm_output is not None:
-            logger.debug(f"[{self.session_id}] on_llm_end (Role: {self.current_agent_role_hint}): response.llm_output IS PRESENT. Type: {type(response.llm_output)}. Content: {str(response.llm_output)[:500]}...")
-        else:
-            logger.debug(f"[{self.session_id}] on_llm_end (Role: {self.current_agent_role_hint}): response.llm_output IS NONE.")
-
-        if response.generations is not None and len(response.generations) > 0:
-            logger.debug(f"[{self.session_id}] on_llm_end (Role: {self.current_agent_role_hint}): response.generations IS PRESENT and NOT EMPTY (length {len(response.generations)}).")
-            for i, gen_list in enumerate(response.generations):
-                logger.debug(f"DEBUG: Generation list {i} (length {len(gen_list)}) for role {self.current_agent_role_hint}:")
-                if gen_list:
-                    for j, gen_item in enumerate(gen_list):
-                        logger.debug(f"DEBUG:   Item {j} type: {type(gen_item)}")
-                        if hasattr(gen_item, 'text'): logger.debug(f"DEBUG:     Item {j} text: {str(gen_item.text)[:100]}...")
-                        if hasattr(gen_item, 'message'):
-                            logger.debug(f"DEBUG:     Item {j} message type: {type(gen_item.message)}")
-                            if hasattr(gen_item.message, 'content'): logger.debug(f"DEBUG:       Item {j} message content: {str(gen_item.message.content)[:100]}...")
-                            if hasattr(gen_item.message, 'additional_kwargs'): logger.debug(f"DEBUG:       Item {j} message additional_kwargs: {gen_item.message.additional_kwargs}")
-                            if hasattr(gen_item.message, 'usage_metadata'): logger.debug(f"DEBUG:       Item {j} message usage_metadata: {gen_item.message.usage_metadata}")
-                            if hasattr(gen_item.message, 'response_metadata'): logger.debug(f"DEBUG:       Item {j} message response_metadata: {gen_item.message.response_metadata}")
-                        if hasattr(gen_item, 'generation_info'): logger.debug(f"DEBUG:     Item {j} generation_info: {gen_item.generation_info}")
-        else:
-            logger.debug(f"[{self.session_id}] on_llm_end (Role: {self.current_agent_role_hint}): response.generations IS NONE or EMPTY.")
-
+        logger.debug(f"[{self.session_id}] on_llm_end (Role: {role_hint_from_meta}): Full response object type: {type(response)}") 
+        
+        input_tokens: Optional[int] = None; output_tokens: Optional[int] = None; total_tokens: Optional[int] = None
+        model_name: str = "unknown_model"; source_for_tokens = "unknown"
 
         try:
+            # ... (existing token parsing logic - unchanged) ...
             if response.llm_output and isinstance(response.llm_output, dict):
+                logger.debug(f"[{self.session_id}] on_llm_end (Role: {role_hint_from_meta}): response.llm_output IS DICT: {response.llm_output}")
                 llm_output_data = response.llm_output
                 source_for_tokens = "llm_output"
                 model_name = llm_output_data.get('model_name', llm_output_data.get('model', model_name))
-                logger.debug(f"[{self.session_id}] on_llm_end (Role: {self.current_agent_role_hint}): Processing llm_output. Model name from llm_output: {model_name}")
-
                 if 'token_usage' in llm_output_data and isinstance(llm_output_data['token_usage'], dict):
-                    usage_dict_from_llm_output = llm_output_data['token_usage']
-                    input_tokens = usage_dict_from_llm_output.get('prompt_tokens', usage_dict_from_llm_output.get('input_tokens'))
-                    output_tokens = usage_dict_from_llm_output.get('completion_tokens', usage_dict_from_llm_output.get('output_tokens'))
-                    total_tokens = usage_dict_from_llm_output.get('total_tokens')
-                elif 'usage_metadata' in llm_output_data and isinstance(llm_output_data['usage_metadata'], dict):
-                    usage_metadata_from_llm_output = llm_output_data['usage_metadata']
-                    input_tokens = usage_metadata_from_llm_output.get('input_tokens', usage_metadata_from_llm_output.get('prompt_token_count'))
-                    output_tokens = usage_metadata_from_llm_output.get('output_tokens', usage_metadata_from_llm_output.get('candidates_token_count'))
-                    total_tokens = usage_metadata_from_llm_output.get('total_tokens', usage_metadata_from_llm_output.get('total_token_count'))
-                elif 'eval_count' in llm_output_data:
+                    usage_dict = llm_output_data['token_usage']
+                    input_tokens = usage_dict.get('prompt_tokens', usage_dict.get('input_tokens'))
+                    output_tokens = usage_dict.get('completion_tokens', usage_dict.get('output_tokens'))
+                    total_tokens = usage_dict.get('total_tokens')
+                elif 'usage_metadata' in llm_output_data and isinstance(llm_output_data['usage_metadata'], dict): 
+                    usage_dict = llm_output_data['usage_metadata']
+                    input_tokens = usage_dict.get('prompt_token_count')
+                    output_tokens = usage_dict.get('candidates_token_count')
+                    total_tokens = usage_dict.get('total_token_count')
+                elif 'eval_count' in llm_output_data: 
                     output_tokens = llm_output_data.get('eval_count')
                     input_tokens = llm_output_data.get('prompt_eval_count')
+            else:
+                 logger.debug(f"[{self.session_id}] on_llm_end (Role: {role_hint_from_meta}): response.llm_output IS NONE or NOT DICT.")
 
-            if (input_tokens is None or output_tokens is None) and response.generations:
-                logger.debug(f"[{self.session_id}] on_llm_end (Role: {self.current_agent_role_hint}): Tokens not found or incomplete in llm_output, trying response.generations.")
-                for gen_list in response.generations:
-                    if not gen_list: continue
+            if (input_tokens is None and output_tokens is None) and response.generations:
+                logger.debug(f"[{self.session_id}] on_llm_end (Role: {role_hint_from_meta}): response.generations IS PRESENT and NOT EMPTY (length {len(response.generations)}).")
+                for gen_list_idx, gen_list in enumerate(response.generations):
+                    if not gen_list: logger.debug(f"DEBUG: Generation list {gen_list_idx} is empty for role {role_hint_from_meta}."); continue
+                    logger.debug(f"DEBUG: Generation list {gen_list_idx} (length {len(gen_list)}) for role {role_hint_from_meta}:")
                     first_gen = gen_list[0]
                     source_for_tokens = "generations"
-                    
+                    logger.debug(f"DEBUG:   Item 0 type: {type(first_gen)}")
+                    if hasattr(first_gen, 'text'): logger.debug(f"DEBUG:     Item 0 text: {first_gen.text[:50]}...")
+                    if hasattr(first_gen, 'message'): 
+                        logger.debug(f"DEBUG:     Item 0 message type: {type(first_gen.message)}")
+                        if hasattr(first_gen.message, 'content'): logger.debug(f"DEBUG:       Item 0 message content: {first_gen.message.content[:50]}...")
+                        if hasattr(first_gen.message, 'additional_kwargs'): logger.debug(f"DEBUG:       Item 0 message additional_kwargs: {first_gen.message.additional_kwargs}")
+                        if hasattr(first_gen.message, 'usage_metadata'): logger.debug(f"DEBUG:       Item 0 message usage_metadata: {first_gen.message.usage_metadata}")
+                        if hasattr(first_gen.message, 'response_metadata'): logger.debug(f"DEBUG:       Item 0 message response_metadata: {first_gen.message.response_metadata}")
+
+                    if hasattr(first_gen, 'generation_info'): logger.debug(f"DEBUG:     Item 0 generation_info: {first_gen.generation_info}")
+
                     if hasattr(first_gen, 'message') and hasattr(first_gen.message, 'usage_metadata') and first_gen.message.usage_metadata:
-                        usage_metadata_from_gen = first_gen.message.usage_metadata
-                        if isinstance(usage_metadata_from_gen, dict):
-                            input_tokens = usage_metadata_from_gen.get('input_tokens', usage_metadata_from_gen.get('prompt_token_count'))
-                            output_tokens = usage_metadata_from_gen.get('output_tokens', usage_metadata_from_gen.get('candidates_token_count'))
-                            total_tokens = usage_metadata_from_gen.get('total_tokens', usage_metadata_from_gen.get('total_token_count'))
+                        usage_metadata = first_gen.message.usage_metadata
+                        if isinstance(usage_metadata, dict):
+                            input_tokens = usage_metadata.get('prompt_token_count', usage_metadata.get('input_tokens'))
+                            output_tokens = usage_metadata.get('candidates_token_count', usage_metadata.get('output_tokens'))
+                            total_tokens = usage_metadata.get('total_token_count')
                             if hasattr(first_gen.message, 'response_metadata') and isinstance(first_gen.message.response_metadata, dict):
-                                model_name = first_gen.message.response_metadata.get('model_name', model_name)
-                            logger.debug(f"[{self.session_id}] on_llm_end (Role: {self.current_agent_role_hint}): Tokens from generations.message.usage_metadata (Gemini/ChatChunk): In={input_tokens}, Out={output_tokens}, Total={total_tokens}, Model={model_name}")
-                            break
+                                model_name_candidate = first_gen.message.response_metadata.get('model_name', model_name) 
+                                if model_name_candidate and model_name_candidate != "unknown_model": model_name = model_name_candidate
+                            if (not model_name or model_name == "unknown_model") and first_gen.generation_info and isinstance(first_gen.generation_info, dict): # Fallback to generation_info for model_name
+                                model_name_candidate = first_gen.generation_info.get('model_name', first_gen.generation_info.get('model', model_name))
+                                if model_name_candidate and model_name_candidate != "unknown_model": model_name = model_name_candidate
+
+                            logger.debug(f"[{self.session_id}] on_llm_end (Role: {role_hint_from_meta}): Tokens from generations.message.usage_metadata (Gemini/ChatChunk): In={input_tokens}, Out={output_tokens}, Total={total_tokens}, Model={model_name}")
+                            break 
                     elif hasattr(first_gen, 'generation_info') and first_gen.generation_info:
                         gen_info = first_gen.generation_info
                         if isinstance(gen_info, dict):
-                            model_name = gen_info.get('model', model_name)
-                            if 'token_usage' in gen_info and isinstance(gen_info['token_usage'], dict):
-                                usage_dict_from_gen_info = gen_info['token_usage']
-                                input_tokens = usage_dict_from_gen_info.get('prompt_tokens', usage_dict_from_gen_info.get('input_tokens'))
-                                output_tokens = usage_dict_from_gen_info.get('completion_tokens', usage_dict_from_gen_info.get('output_tokens'))
-                                total_tokens = usage_dict_from_gen_info.get('total_tokens')
-                            elif 'eval_count' in gen_info:
+                            model_name_candidate = gen_info.get('model', gen_info.get('model_name', model_name))
+                            if model_name_candidate and model_name_candidate != "unknown_model": model_name = model_name_candidate
+
+                            if 'token_usage' in gen_info and isinstance(gen_info['token_usage'], dict): 
+                                usage_dict = gen_info['token_usage']
+                                input_tokens = usage_dict.get('prompt_tokens', usage_dict.get('input_tokens'))
+                                output_tokens = usage_dict.get('completion_tokens', usage_dict.get('output_tokens'))
+                                total_tokens = usage_dict.get('total_tokens')
+                                logger.debug(f"[{self.session_id}] on_llm_end (Role: {role_hint_from_meta}): Tokens from generations.generation_info.token_usage (OpenAI): In={input_tokens}, Out={output_tokens}, Total={total_tokens}, Model={model_name}")
+                            elif 'eval_count' in gen_info: 
                                 output_tokens = gen_info.get('eval_count')
                                 input_tokens = gen_info.get('prompt_eval_count')
-                            elif 'usage_metadata' in gen_info and isinstance(gen_info['usage_metadata'], dict):
-                                usage_metadata_nested = gen_info['usage_metadata']
-                                input_tokens = usage_metadata_nested.get('input_tokens', usage_metadata_nested.get('prompt_token_count'))
-                                output_tokens = usage_metadata_nested.get('output_tokens', usage_metadata_nested.get('candidates_token_count'))
-                                total_tokens = usage_metadata_nested.get('total_tokens', usage_metadata_nested.get('total_token_count'))
-                            logger.debug(f"[{self.session_id}] on_llm_end (Role: {self.current_agent_role_hint}): Tokens from generations.generation_info (Ollama/Other): In={input_tokens}, Out={output_tokens}, Total={total_tokens}, Model={model_name}")
+                                logger.debug(f"[{self.session_id}] on_llm_end (Role: {role_hint_from_meta}): Tokens from generations.generation_info (Ollama): In={input_tokens}, Out={output_tokens}, Model={model_name}")
                             break
-            
+            else:
+                 logger.debug(f"[{self.session_id}] on_llm_end (Role: {role_hint_from_meta}): Tokens not found or incomplete in llm_output, AND response.generations is missing or empty.")
+
+
             input_tokens = int(input_tokens) if input_tokens is not None else 0
             output_tokens = int(output_tokens) if output_tokens is not None else 0
             if total_tokens is None: total_tokens = input_tokens + output_tokens
             else: total_tokens = int(total_tokens)
 
-            logger.debug(f"[{self.session_id}] on_llm_end (Role: {self.current_agent_role_hint}): Final parsed tokens before sending: In={input_tokens}, Out={output_tokens}, Total={total_tokens}, Model={model_name}, Source={source_for_tokens}")
-
             if input_tokens > 0 or output_tokens > 0 or total_tokens > 0:
                 token_usage_payload = {
-                    "model_name": str(model_name),
-                    "role_hint": self.current_agent_role_hint or LOG_SOURCE_LLM_CORE,
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "total_tokens": total_tokens,
-                    "source": source_for_tokens
+                    "model_name": str(model_name), "role_hint": role_hint_from_meta,
+                    "input_tokens": input_tokens, "output_tokens": output_tokens,
+                    "total_tokens": total_tokens, "source": source_for_tokens
                 }
-                usage_str = f"Model: {model_name}, Role: {token_usage_payload['role_hint']}, Input: {input_tokens}, Output: {output_tokens}, Total: {total_tokens} (Source: {source_for_tokens})"
-                await self.send_ws_message("monitor_log", {"text": f"{log_prefix} [LLM Token Usage] {usage_str}", "log_source": f"{LOG_SOURCE_LLM_CORE}_TOKEN_USAGE"})
-                logger.info(f"[{self.session_id}] Sending 'llm_token_usage' message with payload: {token_usage_payload}")
+                logger.debug(f"[{self.session_id}] on_llm_end (Role: {role_hint_from_meta}): Final parsed tokens before sending: In={input_tokens}, Out={output_tokens}, Total={total_tokens}, Model={model_name}, Source={source_for_tokens}")
+                usage_str = f"Model: {model_name}, Role: {role_hint_from_meta}, In: {input_tokens}, Out: {output_tokens}, Total: {total_tokens} (Src: {source_for_tokens})"
+                log_content_tokens = f"[LLM Token Usage] {usage_str}"
+                await self.send_ws_message("monitor_log", f"{log_prefix} {log_content_tokens}")
                 await self.send_ws_message("llm_token_usage", token_usage_payload)
-                await self._save_message_to_db("llm_token_usage", token_usage_payload)
+                await self._save_message(DB_MSG_TYPE_LLM_TOKEN_USAGE, json.dumps(token_usage_payload))
+                logger.info(f"[{self.session_id}] Sending 'llm_token_usage' message with payload: {token_usage_payload}")
             else:
-                logger.warning(f"[{self.session_id}] on_llm_end: No positive token counts found (In={input_tokens}, Out={output_tokens}, Total={total_tokens}). 'llm_token_usage' message will NOT be sent for role_hint: {self.current_agent_role_hint}.")
+                 logger.debug(f"[{self.session_id}] on_llm_end (Role: {role_hint_from_meta}): No valid token usage data found to send (all zero or None).")
         except Exception as e:
-            logger.error(f"[{self.session_id}] Error processing token usage in on_llm_end for role_hint {self.current_agent_role_hint}: {e}", exc_info=True)
-        
-        role_hint_for_status = self.current_agent_role_hint or LOG_SOURCE_LLM_CORE
-        component_hint_for_status = role_hint_for_status if role_hint_for_status != LOG_SOURCE_LLM_CORE else "LLM"
-        await self._send_thinking_update(f"Thinking ({component_hint_for_status}) complete.", "LLM_PROCESSING_END", role_hint_for_status, SUB_TYPE_BOTTOM_LINE)
-        self.current_agent_role_hint = None
+            logger.error(f"[{self.session_id}] Error processing token usage in on_llm_end (Role: {role_hint_from_meta}): {e}", exc_info=True)
+
+        # --- Send final agent message if this LLM call was from OverallEvaluatorNode ---
+        if self.is_final_evaluator_llm_active:
+            logger.info(f"[{self.session_id}] on_llm_end: Condition `if self.is_final_evaluator_llm_active` is TRUE. Proceeding to send agent_message.") # ADDED
+            final_answer_content = "No final output from OverallEvaluator's LLM."
+            if response.generations and response.generations[0]:
+                first_generation = response.generations[0][0]
+                if hasattr(first_generation, 'message') and isinstance(first_generation.message, AIMessage):
+                    final_answer_content = first_generation.message.content
+                elif hasattr(first_generation, 'text'): 
+                    final_answer_content = first_generation.text
+                else:
+                    logger.warning(f"[{self.session_id}] Could not extract final answer content from OverallEvaluator's LLM response structure.")
+
+            logger.info(f"[{self.session_id}] Sending final agent_message from OverallEvaluatorNode: '{final_answer_content[:100]}...'")
+            await self.send_ws_message(AGENT_MESSAGE_TYPE_FINAL_ANSWER, final_answer_content)
+            await self._save_message(DB_MSG_TYPE_AGENT_FINAL_ANSWER, final_answer_content) 
+            
+            self.is_final_evaluator_llm_active = False 
+            self.active_langgraph_node_name = None 
+        else:
+            logger.info(
+                f"[{self.session_id}] on_llm_end: Condition `if self.is_final_evaluator_llm_active` is FALSE. "
+                f"Not sending agent_message. "
+                f"active_node (from self): '{self.active_langgraph_node_name}', "
+                f"is_final_evaluator_active_flag (from self): {self.is_final_evaluator_llm_active}"
+            )
 
     async def on_llm_error(self, error: Union[Exception, KeyboardInterrupt], **kwargs: Any) -> None:
         log_prefix = self._get_log_prefix(); error_type_name = type(error).__name__
-        role_hint = self.current_agent_role_hint or LOG_SOURCE_LLM_CORE
-        component_hint_for_status = role_hint if role_hint != LOG_SOURCE_LLM_CORE else "LLM"
-        logger.error(f"[{self.session_id}] LLM Error ({component_hint_for_status}): {error}", exc_info=True)
-        error_content_for_db = f"LLM Core Error ({component_hint_for_status}) {error_type_name}: {error}"
-        
-        await self.send_ws_message("monitor_log", {"text": f"{log_prefix} {error_content_for_db}", "log_source": f"{LOG_SOURCE_LLM_CORE}_ERROR_{role_hint.upper()}"})
-        await self._send_thinking_update(f"Error in LLM ({component_hint_for_status}).", "LLM_ERROR", role_hint, SUB_TYPE_BOTTOM_LINE, details={"error_type": error_type_name, "error_message": str(error)[:100]})
-        await self._save_message_to_db(f"error_llm_{role_hint.lower()}", {"error": error_content_for_db})
-        self.current_agent_role_hint = None
+        logger.error(f"[{self.session_id}] LLM Error: {error}", exc_info=True)
+        error_content = f"[LLM Error] {error_type_name}: {error}"
+        await self.send_ws_message("monitor_log", f"{log_prefix} {error_content}")
+        await self.send_ws_message("status_message", "Error occurred during LLM call.")
+        await self.send_ws_message(AGENT_MESSAGE_TYPE_THINKING_UPDATE, {"status": "Error during LLM call."})
+        await self._save_message(DB_MSG_TYPE_ERROR, error_content)
+        self.is_final_evaluator_llm_active = False 
+        self.active_langgraph_node_name = None
 
-    async def on_chain_start(self, serialized: Dict[str, Any], inputs: Dict[str, Any], **kwargs: Any) -> None: pass
-    async def on_chain_end(self, outputs: Dict[str, Any], **kwargs: Any) -> None: pass
-    async def on_chain_error(self, error: Union[Exception, KeyboardInterrupt], **kwargs: Any) -> None: pass
+    async def on_chain_start(self, serialized: Dict[str, Any], inputs: Dict[str, Any], *, run_id: UUID, parent_run_id: Optional[UUID] = None, tags: Optional[List[str]] = None, metadata: Optional[Dict[str, Any]] = None, **kwargs: Any) -> None:
+        chain_name = serialized.get("name", "UnknownChain") 
+        node_name_from_tags = None
+        if tags:
+            for tag in tags:
+                if tag.startswith("langgraph:node:"):
+                    node_name_from_tags = tag.split("langgraph:node:", 1)[1]
+                    break
+        
+        effective_node_name = node_name_from_tags or chain_name 
+        # CRITICAL: Only update self.active_langgraph_node_name if it's a langgraph node run
+        if node_name_from_tags or "langgraph" in (metadata.get("langgraph_path", []) if metadata else []):
+             self.active_langgraph_node_name = effective_node_name 
+             logger.info(f"[{self.session_id}] on_chain_start: LANGGRAPH NODE START DETECTED. Node Name: '{self.active_langgraph_node_name}'. Self.is_final_eval_llm_active BEFORE check: {self.is_final_evaluator_llm_active}")
+             if self.active_langgraph_node_name == "overall_evaluator":
+                logger.info(f"[{self.session_id}] on_chain_start: OverallEvaluatorNode chain starting. Flag is_final_evaluator_llm_active should be set to TRUE by its LLM's on_chat_model_start shortly.")
+             else:
+                # Reset the flag if another node starts, to prevent stale state from a previous overall_evaluator run in the same session (if that's possible)
+                if self.is_final_evaluator_llm_active and self.active_langgraph_node_name != "overall_evaluator":
+                    logger.warning(f"[{self.session_id}] on_chain_start: Starting node '{self.active_langgraph_node_name}' but is_final_evaluator_llm_active was TRUE. Resetting to FALSE.")
+                    self.is_final_evaluator_llm_active = False
+
+        logger.debug(f"[{self.session_id}] on_chain_start: Chain/Node='{effective_node_name}', Inputs='{str(inputs)[:100]}...', Tags='{tags}', Metadata='{metadata}'")
+
+    async def on_chain_end(self, outputs: Dict[str, Any], *, run_id: UUID, parent_run_id: Optional[UUID] = None, **kwargs: Any) -> None:
+        logger.debug(f"[{self.session_id}] on_chain_end: For Node='{self.active_langgraph_node_name or 'UnknownChain'}', Outputs='{str(outputs)[:100]}...'")
+        # Don't reset active_langgraph_node_name here, as on_llm_end relies on it.
+        # It will be reset in on_llm_end if it was the final evaluator's LLM, or by the next on_chain_start/on_llm_start.
+        pass
+
+    async def on_chain_error(self, error: Union[Exception, KeyboardInterrupt], **kwargs: Any) -> None: 
+        log_prefix = self._get_log_prefix(); error_type_name = type(error).__name__
+        active_node = self.active_langgraph_node_name or "UnknownChain"
+        logger.error(f"[{self.session_id}] Chain Error (Node: {active_node}): {error}", exc_info=True)
+        error_content = f"[Chain Error] Node '{active_node}' failed: {error_type_name}: {error}"
+        await self.send_ws_message("monitor_log", f"{log_prefix} {error_content}")
+        await self.send_ws_message("status_message", f"Error occurred in agent processing node: {active_node}.")
+        await self.send_ws_message(AGENT_MESSAGE_TYPE_THINKING_UPDATE, {"status": f"Error in node: {active_node}."})
+        await self._save_message(DB_MSG_TYPE_ERROR, error_content)
+        # If a chain errors out, it's unlikely it was the final evaluator LLM, but reset defensively
+        self.is_final_evaluator_llm_active = False 
+        # Don't reset active_langgraph_node_name here to ensure errors are logged with context.
+        # It will be overwritten by the next node start or cleared if the graph ends.
+
 
     async def on_tool_start(self, serialized: Dict[str, Any], input_str: str, **kwargs: Any) -> None:
-        self.current_tool_name = serialized.get("name", "UnknownTool")
-        self.current_tool_input_str = input_str
-        
-        self._check_cancellation(f"Tool execution ('{self.current_tool_name}')", "Initial Check")
-        await asyncio.sleep(0) # Yield control briefly
-        self._check_cancellation(f"Tool execution ('{self.current_tool_name}')", "Post-Yield Check")
-        # If AgentCancelledException is raised, it will propagate up and be handled by the agent flow.
-
+        self.current_tool_name = serialized.get("name", "Unknown Tool")
+        try:
+            self._check_cancellation(f"Tool execution ('{self.current_tool_name}')")
+        except AgentCancelledException:
+            self.current_tool_name = None 
+            raise
         log_prefix = self._get_log_prefix()
-        log_input_summary = input_str[:150] + "..." if len(str(input_str)) > 150 else input_str
-        monitor_log_content = f"[Tool Start] Using tool '{self.current_tool_name}' with input: '{input_str}'"
-        tool_log_source = f"{LOG_SOURCE_TOOL_PREFIX}_{self.current_tool_name.upper()}_START"
+        log_input = input_str[:500] + "..." if len(str(input_str)) > 500 else input_str
+        log_content = f"[Tool Start] Using '{self.current_tool_name}' with input: '{log_input}'"
+        logger.info(f"[{self.session_id}] {log_content}")
+        await self.send_ws_message("monitor_log", f"{log_prefix} {log_content}")
+        await self.send_ws_message(AGENT_MESSAGE_TYPE_THINKING_UPDATE, {"status": f"Using tool: {self.current_tool_name}..."})
+        await self._save_message(DB_MSG_TYPE_TOOL_INPUT, f"{self.current_tool_name}:::{log_input}")
+
+    async def on_tool_end(self, output: str, name: str = "Unknown Tool", **kwargs: Any) -> None:
+        tool_name_for_log = name
+        if name == "Unknown Tool" and self.current_tool_name:
+            tool_name_for_log = self.current_tool_name
         
-        await self.send_ws_message("monitor_log", { "text": f"{log_prefix} {monitor_log_content}", "log_source": tool_log_source })
-        user_friendly_tool_name = self.current_tool_name.replace("_", " ").title()
-        await self._send_thinking_update(f"Using {user_friendly_tool_name}...", "TOOL_USING", f"{LOG_SOURCE_TOOL_PREFIX}_{self.current_tool_name.upper()}", SUB_TYPE_SUB_STATUS, details={"tool_name": self.current_tool_name, "input_summary": log_input_summary})
-        await self._save_message_to_db(f"tool_input_{self.current_tool_name}", {"tool_name": self.current_tool_name, "input": input_str})
+        log_prefix = self._get_log_prefix()
+        output_str = str(output)
+        logger.info(f"[{self.session_id}] Tool '{tool_name_for_log}' finished. Output length: {len(output_str)}")
 
-    async def on_tool_end(self, output: str, name: str = "UnknownTool", **kwargs: Any) -> None:
-        tool_name_for_log = name if name != "UnknownTool" else self.current_tool_name or "UnknownTool"
-        log_prefix = self._get_log_prefix(); output_str = str(output)
-        monitor_output_summary = output_str[:1000] + "..." if len(output_str) > 1000 else output_str
-        log_content_tool_end = f"[Tool Output] Tool '{tool_name_for_log}' returned:\n---\n{monitor_output_summary.strip()}\n---"
-        final_log_source = f"{LOG_SOURCE_TOOL_PREFIX}_{tool_name_for_log.upper()}_OUTPUT"
-
-        logger.critical(f"DEBUG_ARTIFACT_REFRESH: [callbacks.py/on_tool_end] Entered for tool: '{tool_name_for_log}'. Output starts with: '{output_str[:50]}...'")
+        monitor_output = output_str
         success_prefix = "SUCCESS::write_file:::"
-        if tool_name_for_log == "write_file":
-            logger.critical(f"DEBUG_ARTIFACT_REFRESH: [callbacks.py/on_tool_end] Tool is 'write_file'. Checking output prefix.")
-            if output_str.startswith(success_prefix):
-                logger.critical(f"DEBUG_ARTIFACT_REFRESH: [callbacks.py/on_tool_end] 'write_file' output STARTS WITH success_prefix.")
-                try:
-                    if len(output_str) > len(success_prefix):
-                        relative_path_str = output_str[len(success_prefix):]
-                        await self._save_message_to_db("artifact_generated", {"path": relative_path_str, "tool": tool_name_for_log})
-                        await self.send_ws_message("monitor_log", {"text": f"{log_prefix} [{LOG_SOURCE_ARTIFACT.upper()}_GENERATED] {relative_path_str} (via {tool_name_for_log})", "log_source": f"{LOG_SOURCE_ARTIFACT}_{tool_name_for_log.upper()}"})
-                        log_content_tool_end = f"[Tool Output] Tool '{tool_name_for_log}' successfully wrote file: '{relative_path_str}'"
-                        if self.current_task_id:
-                            logger.critical(f"DEBUG_ARTIFACT_REFRESH: [callbacks.py/on_tool_end] write_file SUCCESS. About to send 'trigger_artifact_refresh' for task {self.current_task_id}")
-                            await self.send_ws_message("trigger_artifact_refresh", {"taskId": self.current_task_id})
-                        else:
-                            logger.warning(f"DEBUG_ARTIFACT_REFRESH: [callbacks.py/on_tool_end] write_file SUCCESS but current_task_id is None. Cannot trigger refresh.")
-                    else:
-                        logger.warning(f"DEBUG_ARTIFACT_REFRESH: [callbacks.py/on_tool_end] 'write_file' output starts with prefix but is too short: '{output_str}'")
-                except Exception as parse_err:
-                    logger.error(f"[{self.session_id}] Error processing write_file success output '{output_str}': {parse_err}", exc_info=True)
-            else:
-                logger.warning(f"DEBUG_ARTIFACT_REFRESH: [callbacks.py/on_tool_end] 'write_file' output DOES NOT start with success_prefix. Output: '{output_str[:100]}...'")
-        
-        await self.send_ws_message("monitor_log", {"text": f"{log_prefix} {log_content_tool_end}", "log_source": final_log_source})
-        await self._save_message_to_db(f"tool_output_{tool_name_for_log}", {"tool_name": tool_name_for_log, "output": output_str})
-        
-        tool_output_for_chat_content = output_str
-        artifact_filename_for_chat = None
-        tool_input_summary_for_chat = str(self.current_tool_input_str)[:150] + "..." if self.current_tool_input_str else "N/A"
-
-        if tool_name_for_log in TEXT_OUTPUT_TOOLS_FOR_CHAT:
-            if tool_name_for_log == "read_file":
-                artifact_filename_for_chat = self.current_tool_input_str
-        
-        elif tool_name_for_log in CONFIRMATION_ONLY_TOOLS_FOR_CHAT:
-            if tool_name_for_log == "write_file":
-                if output_str.startswith(success_prefix) and len(output_str) > len(success_prefix):
-                    parsed_filename = output_str[len(success_prefix):]
-                    tool_output_for_chat_content = f"File '{parsed_filename}' written successfully to workspace."
-                    artifact_filename_for_chat = parsed_filename
+        if tool_name_for_log == "write_file" and output_str.startswith(success_prefix):
+            try:
+                if len(output_str) > len(success_prefix):
+                    relative_path_str = output_str[len(success_prefix):]
+                    logger.info(f"[{self.session_id}] Detected successful write_file: '{relative_path_str}'")
+                    await self._save_message(DB_MSG_TYPE_ARTIFACT_GENERATED, relative_path_str)
+                    await self.send_ws_message("monitor_log", f"{log_prefix} [ARTIFACT_GENERATED] {relative_path_str} (via {tool_name_for_log})")
+                    monitor_output = f"Successfully wrote file: '{relative_path_str}'"
+                    if self.current_task_id:
+                        logger.info(f"[{self.session_id}] Triggering artifact refresh for task {self.current_task_id} after {tool_name_for_log}.")
+                        await self.send_ws_message("trigger_artifact_refresh", {"taskId": self.current_task_id})
                 else:
-                    tool_output_for_chat_content = f"Attempted to write file. Status: {output_str}"
-            elif tool_name_for_log == "python_package_installer":
-                tool_output_for_chat_content = output_str
-        
-        if tool_name_for_log in TEXT_OUTPUT_TOOLS_FOR_CHAT or tool_name_for_log in CONFIRMATION_ONLY_TOOLS_FOR_CHAT:
-            chat_payload = {
-                "tool_name": tool_name_for_log,
-                "tool_input_summary": tool_input_summary_for_chat,
-                "tool_output_content": tool_output_for_chat_content,
-                "status": "success",
-                "artifact_filename": artifact_filename_for_chat,
-                "original_length": len(tool_output_for_chat_content),
-                "is_truncated": False
-            }
-            await self.send_ws_message("tool_result_for_chat", chat_payload)
-            await self._save_message_to_db(DB_MSG_TYPE_TOOL_RESULT_FOR_CHAT, chat_payload)
-            logger.info(f"[{self.session_id}] Sent and saved 'tool_result_for_chat' for tool '{tool_name_for_log}'.")
-        
-        user_friendly_tool_name = tool_name_for_log.replace("_", " ").title()
-        await self._send_thinking_update(f"{user_friendly_tool_name} finished.", "TOOL_COMPLETED", f"{LOG_SOURCE_TOOL_PREFIX}_{tool_name_for_log.upper()}", SUB_TYPE_SUB_STATUS, details={"tool_name": tool_name_for_log, "output_summary": output_str[:100]+"..." if output_str else "No output."})
-        
-        self.current_tool_name = None
-        self.current_tool_input_str = None
+                    logger.warning(f"[{self.session_id}] write_file output matched prefix but had no filename: '{output_str}'")
+            except Exception as parse_err:
+                logger.error(f"[{self.session_id}] Error processing write_file success output '{output_str}': {parse_err}", exc_info=True)
+        else:
+            monitor_output = output_str[:1000] + "..." if len(output_str) > 1000 else output_str
 
-    async def on_tool_error(self, error: Union[Exception, KeyboardInterrupt], name: str = "UnknownTool", **kwargs: Any) -> None:
-        actual_tool_name = name if name != "UnknownTool" else self.current_tool_name or "UnknownTool"
-        log_prefix = self._get_log_prefix(); error_type_name = type(error).__name__; error_str = str(error)
-        user_friendly_tool_name = actual_tool_name.replace("_", " ").title()
-        tool_error_log_source = f"{LOG_SOURCE_TOOL_PREFIX}_{actual_tool_name.upper()}_ERROR"
+        formatted_output = f"\n---\n{monitor_output.strip()}\n---"
+        log_content = f"[Tool Output] Tool '{tool_name_for_log}' returned:{formatted_output}"
+        await self.send_ws_message("monitor_log", f"{log_prefix} {log_content}")
+        await self.send_ws_message(AGENT_MESSAGE_TYPE_THINKING_UPDATE, {"status": f"Processed tool: {tool_name_for_log}."})
+        await self._save_message(DB_MSG_TYPE_TOOL_OUTPUT, output_str)
+        self.current_tool_name = None
+
+    async def on_tool_error(self, error: Union[Exception, KeyboardInterrupt], name: str = "Unknown Tool", **kwargs: Any) -> None:
+        actual_tool_name = name
+        if name == "Unknown Tool" and self.current_tool_name:
+            actual_tool_name = self.current_tool_name
         
         if isinstance(error, AgentCancelledException):
-            logger.warning(f"[{self.session_id}] Tool '{actual_tool_name}' execution cancelled by callback.")
-            await self._send_thinking_update(f"Tool {user_friendly_tool_name} cancelled.", "TOOL_CANCELLED", f"{LOG_SOURCE_TOOL_PREFIX}_{actual_tool_name.upper()}_CANCELLED", SUB_TYPE_SUB_STATUS)
-            await self.send_ws_message("monitor_log", {"text": f"{log_prefix} [Tool Cancelled] Tool '{actual_tool_name}' execution stopped by callback.", "log_source": f"{LOG_SOURCE_TOOL_PREFIX}_{actual_tool_name.upper()}_CANCELLED"})
-            self.current_tool_name = None; self.current_tool_input_str = None; raise error
+            logger.warning(f"[{self.session_id}] Tool '{actual_tool_name}' execution cancelled by AgentCancelledException.")
+            await self.send_ws_message(AGENT_MESSAGE_TYPE_THINKING_UPDATE, {"status": f"Tool cancelled: {actual_tool_name}."})
+            self.current_tool_name = None 
+            raise error
 
+        log_prefix = self._get_log_prefix(); error_type_name = type(error).__name__
+        error_str = str(error)
+        
         logger.error(f"[{self.session_id}] Tool '{actual_tool_name}' Error: {error_str}", exc_info=True)
-        monitor_error_content = f"[Tool Error] Tool '{actual_tool_name}' failed: {error_type_name}: {error_str}"
-        await self.send_ws_message("monitor_log", {"text": f"{log_prefix} {monitor_error_content}", "log_source": tool_error_log_source})
-        await self._send_thinking_update(f"Error with {user_friendly_tool_name}. (Retrying or evaluating...)", "TOOL_ERROR", tool_error_log_source, SUB_TYPE_SUB_STATUS, details={"tool_name": actual_tool_name, "error_type": error_type_name, "error_message": error_str[:200]})
-        await self._save_message_to_db(f"error_tool_{actual_tool_name}", {"tool_name": actual_tool_name, "error_type": error_type_name, "error_message": error_str})
+        error_content = f"[Tool Error] Tool '{actual_tool_name}' failed: {error_type_name}: {error_str}"
+        await self.send_ws_message("monitor_log", f"{log_prefix} {error_content}")
+        await self.send_ws_message("status_message", f"Error occurred during tool execution: {actual_tool_name}.")
+        await self.send_ws_message(AGENT_MESSAGE_TYPE_THINKING_UPDATE, {"status": f"Error with tool: {actual_tool_name}."})
+        await self._save_message(f"{DB_MSG_TYPE_ERROR}_tool", f"{actual_tool_name}::{error_type_name}::{error_str}")
         self.current_tool_name = None
-        self.current_tool_input_str = None
 
     async def on_agent_action(self, action: AgentAction, **kwargs: Any) -> Any:
         log_prefix = self._get_log_prefix()
-        thought_content = ""; action_log = action.log or ""
-        thought_match = re.search(r"Thought:(.*?)(Action:|$)", action_log, re.S | re.IGNORECASE)
-        if thought_match: thought_content = thought_match.group(1).strip()
-        
-        if thought_content:
-            await self._send_thinking_update(thought_content, "AGENT_THOUGHT", LOG_SOURCE_EXECUTOR, SUB_TYPE_THOUGHT, thought_label="Executor thought:")
-            await self.send_ws_message("monitor_log", {"text": f"{log_prefix} [Executor Thought] {thought_content}", "log_source": f"{LOG_SOURCE_EXECUTOR}_THOUGHT"})
-        else:
-            logger.warning(f"[{self.session_id}] Could not extract thought from agent action log: {action_log[:200]}...")
-        
-        action_details_log = f"[Executor Action] Action: {action.tool}, Input: {str(action.tool_input)[:500]}"
-        await self.send_ws_message("monitor_log", {"text": f"{log_prefix} {action_details_log}", "log_source": f"{LOG_SOURCE_EXECUTOR}_ACTION"})
-        await self._send_thinking_update("Processing action...", "AGENT_EXECUTING_LOGIC", LOG_SOURCE_EXECUTOR, SUB_TYPE_BOTTOM_LINE)
+        thought = ""
+        if action.log and "Thought:" in action.log:
+            thought = action.log.split("Thought:",1)[1].split("Action:")[0].strip()
+
+        if thought:
+            logger.debug(f"[{self.session_id}] Extracted thought (Action): {thought}")
+            await self.send_ws_message("monitor_log", f"{log_prefix} [Agent Thought (Action)] {thought}")
+            await self._save_message(DB_MSG_TYPE_AGENT_THOUGHT_ACTION, thought)
+        await self.send_ws_message(AGENT_MESSAGE_TYPE_THINKING_UPDATE, {"status": "Processing action..."})
+
 
     async def on_agent_finish(self, finish: AgentFinish, **kwargs: Any) -> Any:
         log_prefix = self._get_log_prefix()
-        final_thought_content = ""; finish_log = finish.log or ""
-        thought_match = re.search(r"Thought:(.*?)(Final Answer:)", finish_log, re.S | re.IGNORECASE)
-        if thought_match: final_thought_content = thought_match.group(1).strip()
-        
-        if final_thought_content:
-            await self._send_thinking_update(final_thought_content, "AGENT_FINAL_THOUGHT", LOG_SOURCE_EXECUTOR, SUB_TYPE_THOUGHT, thought_label="Executor final thought for step:")
-            await self.send_ws_message("monitor_log", {"text": f"{log_prefix} [Executor Thought Final Step] {final_thought_content}", "log_source": f"{LOG_SOURCE_EXECUTOR}_THOUGHT_FINAL"})
-        else:
-            logger.warning(f"[{self.session_id}] Could not extract final thought from agent finish log.")
-        
-        step_output_content = finish.return_values.get("output", "No specific output from agent step.")
-        if not isinstance(step_output_content, str): step_output_content = str(step_output_content)
-        await self.send_ws_message("monitor_log", {"text": f"{log_prefix} [Executor Step Output] {step_output_content}", "log_source": f"{LOG_SOURCE_EXECUTOR}_STEP_OUTPUT"})
-        await self._save_message_to_db("agent_executor_step_finish", {"output": step_output_content})
-        await self._send_thinking_update("Agent processing step complete.", "EXECUTOR_STEP_COMPLETED", LOG_SOURCE_EXECUTOR, SUB_TYPE_SUB_STATUS)
-        self.current_tool_name = None
-        self.current_tool_input_str = None
+        logger.info(f"[{self.session_id}] on_agent_finish (ReAct style). Log: {finish.log}")
+        self.current_tool_name = None 
+        # Defensively reset these flags. If this on_agent_finish is from a sub-agent within a LangGraph node,
+        # the main graph's on_llm_end/on_chain_start will manage the flags for the graph's context.
+        self.is_final_evaluator_llm_active = False 
+        self.active_langgraph_node_name = None 
+
 
     async def on_text(self, text: str, **kwargs: Any) -> Any: pass
     async def on_retriever_start(self, serialized: Dict[str, Any], query: str, **kwargs: Any) -> Any: pass
