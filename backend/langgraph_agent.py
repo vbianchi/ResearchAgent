@@ -1,19 +1,17 @@
-# backend/langgraph_agent.py (Part 1/2)
+# backend/langgraph_agent.py
 import logging
-from typing import TypedDict, Optional, List, Annotated, Dict, Any
-# backend/langgraph_agent.py (Part 2/2)
-# (Continued from Part 1)
-import asyncio # For the __main__ test block
+from typing import TypedDict, Optional, List, Dict, Any
+import asyncio 
 
-from langchain_core.pydantic_v1 import BaseModel, Field
-from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, ToolMessage
-from langchain_core.prompts import ChatPromptTemplate # For direct_qa_node
-from langchain_core.runnables import RunnableConfig # For type hinting if needed
+from langchain_core.pydantic_v1 import BaseModel, Field 
+from langchain_core.messages import BaseMessage, AIMessage, HumanMessage 
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, END
 
 from backend.config import settings
-from backend.llm_setup import get_llm # To instantiate LLMs in nodes
-from backend.tools import get_dynamic_tools # If DirectQANode needs tools
+from backend.llm_setup import get_llm
+from backend.tools import get_dynamic_tools, ToolLoadingError 
 
 logger = logging.getLogger(__name__)
 
@@ -21,77 +19,77 @@ logger = logging.getLogger(__name__)
 class ResearchAgentState(TypedDict, total=False):
     user_query: str
     classified_intent: Optional[str]
-    plan_steps: Optional[List[Dict[str, Any]]]
-    current_step_index: int
-    current_task_id: Optional[str]
-    chat_history: Optional[List[BaseMessage]]
+    identified_tool_name: Optional[str]
+    extracted_tool_input: Optional[str]
     
-    controller_output_tool_name: Optional[str]
-    controller_output_tool_input: Optional[str]
-    executor_output: Optional[str] # Output from DirectQANode LLM or ExecutorNode LLM/tool
-    previous_step_executor_output: Optional[str]
+    plan_steps: Optional[List[Dict[str, Any]]] 
+    current_step_index: int 
+    current_task_id: Optional[str] 
+    chat_history: Optional[List[BaseMessage]] 
     
-    step_evaluator_output: Optional[Dict[str, Any]]
-    overall_evaluator_output: Optional[Dict[str, Any]] # Node that produces final AIMessage
+    controller_output_tool_name: Optional[str] 
+    controller_output_tool_input: Optional[str] 
+    executor_output: Optional[str] 
+    previous_step_executor_output: Optional[str] 
     
-    retry_count_for_current_step: int
-    accumulated_plan_summary: str
+    step_evaluator_output: Optional[Dict[str, Any]] 
+    overall_evaluator_output: Optional[Dict[str, Any]] 
     
-    # LLM configuration to be used by nodes, passed from initial state or config
-    # This allows nodes to select the correct LLM based on session settings
+    retry_count_for_current_step: int 
+    accumulated_plan_summary: str 
+    
     intent_classifier_llm_id: Optional[str]
     planner_llm_id: Optional[str]
     controller_llm_id: Optional[str]
-    executor_llm_id: Optional[str] # Used by DirectQANode and ExecutorNode
-    evaluator_llm_id: Optional[str] # Used by StepEvaluatorNode and OverallEvaluatorNode
+    executor_llm_id: Optional[str] 
+    evaluator_llm_id: Optional[str] 
 
-    is_direct_qa_flow: bool # Flag to signal a direct QA operation to OverallEvaluator
+    is_direct_qa_flow: bool 
+    direct_tool_request_error: Optional[str] 
 
 
 # --- Node Implementations ---
 
 async def intent_classifier_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    logger.info(">>> NODE: Intent Classifier")
-    # Actual intent classification logic would be here, using an LLM.
-    # For now, we'll rely on the classified_intent passed in the initial state.
-    # This node needs to ensure the LLM IDs for subsequent nodes are set in the state
-    # if they are not already present from the initial graph input.
-    
-    # Retrieve LLM IDs from the config if available, falling back to state or defaults.
-    # The RunnableConfig 'configurable' dict is where these should be.
+    logger.info(">>> NODE: Intent Classifier (Graph Node)")
     configurable_settings = config.get("configurable", {})
-
-    return {
-        "classified_intent": state.get("classified_intent", "DIRECT_QA"), # Assume this is pre-set for now
-        "current_step_index": 0,
-        "retry_count_for_current_step": 0,
-        "is_direct_qa_flow": state.get("classified_intent") == "DIRECT_QA",
-        # Ensure LLM IDs are in the state for other nodes to pick up
+    
+    intent = state.get("classified_intent", "DIRECT_QA") 
+    is_direct_flow_flag = intent in ["DIRECT_QA", "DIRECT_TOOL_REQUEST"]
+    
+    update_dict = {
+        "classified_intent": intent,
+        "identified_tool_name": state.get("identified_tool_name"), 
+        "extracted_tool_input": state.get("extracted_tool_input"), 
+        "current_step_index": 0, 
+        "retry_count_for_current_step": 0, 
+        "is_direct_qa_flow": is_direct_flow_flag, 
         "intent_classifier_llm_id": configurable_settings.get("intent_classifier_llm_id", state.get("intent_classifier_llm_id")),
         "planner_llm_id": configurable_settings.get("planner_llm_id", state.get("planner_llm_id")),
         "controller_llm_id": configurable_settings.get("controller_llm_id", state.get("controller_llm_id")),
         "executor_llm_id": configurable_settings.get("executor_llm_id", state.get("executor_llm_id")),
         "evaluator_llm_id": configurable_settings.get("evaluator_llm_id", state.get("evaluator_llm_id")),
     }
+    logger.info(f"Intent Classifier Node: Outputting state update: { {k: (str(v)[:50] + '...' if isinstance(v, str) and len(v) > 50 else v) for k, v in update_dict.items()} }")
+    return update_dict
+
 
 async def direct_qa_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    logger.info(">>> NODE: Direct QA")
+    logger.info(">>> NODE: Direct QA (LLM Only)")
     user_query = state.get("user_query", "No query provided.")
-    chat_history = state.get("chat_history", [])
+    chat_history_messages = state.get("chat_history", [])
     
-    # Get LLM configuration from state (which should have been populated by intent_classifier_node or initial input)
-    llm_id_str = state.get("executor_llm_id") # Using executor_llm_id for Direct QA
-    if not llm_id_str:
-        logger.warning("DirectQANode: executor_llm_id not found in state. Using system default.")
-        provider = settings.executor_default_provider
-        model_name = settings.executor_default_model_name
-    else:
+    llm_id_str = state.get("executor_llm_id") 
+    provider = settings.executor_default_provider 
+    model_name = settings.executor_default_model_name 
+
+    if llm_id_str:
         try:
             provider, model_name = llm_id_str.split("::", 1)
         except ValueError:
             logger.warning(f"DirectQANode: Invalid LLM ID format '{llm_id_str}'. Using system default.")
-            provider = settings.executor_default_provider
-            model_name = settings.executor_default_model_name
+    else:
+        logger.warning("DirectQANode: executor_llm_id not found in state. Using system default.")
 
     logger.info(f"DirectQANode: Using LLM {provider}::{model_name}")
     
@@ -101,7 +99,13 @@ async def direct_qa_node(state: ResearchAgentState, config: RunnableConfig) -> D
         logger.error(f"DirectQANode: Failed to initialize LLM: {e}")
         return {"executor_output": f"Error: Could not initialize LLM for Direct QA. {e}", "is_direct_qa_flow": True}
 
-    history_str = "\n".join([f"{msg.type}: {msg.content}" for msg in chat_history])
+    history_str_parts = []
+    for msg in chat_history_messages:
+        if isinstance(msg, HumanMessage):
+            history_str_parts.append(f"Human: {msg.content}")
+        elif isinstance(msg, AIMessage):
+            history_str_parts.append(f"AI: {msg.content}")
+    history_str = "\n".join(history_str_parts)
     
     prompt_template = ChatPromptTemplate.from_messages([
         ("system", "You are a helpful AI assistant. Answer the user's query directly and concisely. Consider the chat history for context if relevant."),
@@ -110,22 +114,54 @@ async def direct_qa_node(state: ResearchAgentState, config: RunnableConfig) -> D
     
     chain = prompt_template | llm
     
-    # IMPORTANT: The graph's `RunnableConfig` (containing callbacks) is automatically
-    # propagated to LLM calls made by nodes run within the graph.
-    # So, `WebSocketCallbackHandler`'s `on_llm_start`/`on_llm_end` will be triggered.
-    # However, on_llm_end in the callback by default sends a "monitor_log", not an "agent_message".
-    # We need the OverallEvaluatorNode to produce the final AIMessage.
-    
-    logger.info(f"DirectQANode: Invoking LLM for query: '{user_query}'")
+    logger.info(f"DirectQANode: Invoking LLM for query: '{user_query}' with history.")
     try:
-        # This LLM call will trigger callbacks, but its direct output is for the next node.
-        response = await chain.ainvoke({"user_query": user_query, "chat_history": history_str}, config=config)
+        response = await chain.ainvoke({"user_query": user_query, "chat_history": history_str}, config=config) 
         answer_text = response.content if hasattr(response, 'content') else str(response)
         logger.info(f"DirectQANode: LLM produced answer (raw): {answer_text[:200]}...")
         return {"executor_output": answer_text, "is_direct_qa_flow": True}
     except Exception as e:
         logger.error(f"DirectQANode: Error during LLM invocation: {e}", exc_info=True)
         return {"executor_output": f"Error processing Direct QA: {e}", "is_direct_qa_flow": True}
+
+
+async def direct_tool_executor_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
+    logger.info(">>> NODE: Direct Tool Executor")
+    task_id = state.get("current_task_id")
+    tool_name = state.get("identified_tool_name")
+    tool_input_str = state.get("extracted_tool_input")
+
+    if not task_id:
+        logger.error("DirectToolExecutorNode: Missing task_id in state. Cannot load tools.")
+        return {"executor_output": "Error: Task context missing for tool execution.", "is_direct_qa_flow": True, "direct_tool_request_error": "Task ID missing."}
+    if not tool_name:
+        logger.error("DirectToolExecutorNode: Missing identified_tool_name in state.")
+        return {"executor_output": "Error: Tool name not identified for execution.", "is_direct_qa_flow": True, "direct_tool_request_error": "Tool name missing."}
+
+    logger.info(f"DirectToolExecutorNode: Attempting to execute tool '{tool_name}' with input '{str(tool_input_str)[:100]}...' for task '{task_id}'.")
+
+    try:
+        available_tools = get_dynamic_tools(current_task_id=task_id)
+        logger.debug(f"DirectToolExecutorNode: Loaded {len(available_tools)} tools for task '{task_id}'.")
+    except ToolLoadingError as e:
+        logger.error(f"DirectToolExecutorNode: Failed to load tools for task '{task_id}': {e}", exc_info=True)
+        return {"executor_output": f"Error: Could not load tools for task. {e}", "is_direct_qa_flow": True, "direct_tool_request_error": f"Tool loading failed: {e}"}
+
+    selected_tool = next((t for t in available_tools if t.name == tool_name), None)
+    
+    if not selected_tool:
+        logger.error(f"DirectToolExecutorNode: Tool '{tool_name}' not found in available tools for task '{task_id}'.")
+        tool_names = [t.name for t in available_tools]
+        return {"executor_output": f"Error: Tool '{tool_name}' is not available. Available tools: {tool_names}", "is_direct_qa_flow": True, "direct_tool_request_error": f"Tool '{tool_name}' not found."}
+
+    try:
+        logger.info(f"DirectToolExecutorNode: Executing tool '{selected_tool.name}' with input: {tool_input_str}")
+        tool_result = await selected_tool.arun(tool_input_str, config=config) 
+        logger.info(f"DirectToolExecutorNode: Tool '{tool_name}' executed. Output length: {len(str(tool_result))}. Output snippet: {str(tool_result)[:200]}...")
+        return {"executor_output": str(tool_result), "is_direct_qa_flow": True}
+    except Exception as e:
+        logger.error(f"DirectToolExecutorNode: Error executing tool '{tool_name}': {e}", exc_info=True)
+        return {"executor_output": f"Error during execution of tool '{tool_name}': {e}", "is_direct_qa_flow": True, "direct_tool_request_error": f"Tool execution error: {e}"}
 
 
 async def placeholder_planner_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
@@ -144,11 +180,11 @@ async def placeholder_controller_node(state: ResearchAgentState, config: Runnabl
             "controller_output_tool_input": "placeholder_input_for_tool"}
 
 async def placeholder_executor_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    logger.info(">>> NODE: Executor (Placeholder)")
+    logger.info(">>> NODE: Executor (Placeholder - For PLAN path)")
     tool_name = state.get("controller_output_tool_name", "None")
     tool_input = state.get("controller_output_tool_input", "")
-    logger.info(f"Executing tool: {tool_name} with input: {tool_input}")
-    output = f"Placeholder output from {tool_name}."
+    logger.info(f"Executing tool (Plan Path): {tool_name} with input: {tool_input}")
+    output = f"Placeholder output from {tool_name} (Plan Path)."
     return {"executor_output": output}
 
 async def placeholder_step_evaluator_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
@@ -163,82 +199,97 @@ async def placeholder_step_evaluator_node(state: ResearchAgentState, config: Run
     else: 
         return {"step_evaluator_output": eval_output, "previous_step_executor_output": None, "accumulated_plan_summary": new_accumulated_summary + f"Step {current_idx + 1} Failed Assessment: {eval_output['assessment_of_step']}\n"}
 
+
 async def overall_evaluator_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
     logger.info(">>> NODE: Overall Evaluator")
     
-    final_assessment_text = "Evaluation: Processing complete."
-    is_direct_qa = state.get("is_direct_qa_flow", False)
-    
-    if is_direct_qa:
-        raw_answer = state.get("executor_output", "No direct answer was generated.")
-        logger.info(f"OverallEvaluatorNode: Processing direct QA response: {raw_answer[:200]}...")
-        # This is where the final AIMessage needs to be generated and sent via callback
-        # We'll use an LLM to "present" this answer, ensuring callbacks are triggered.
-        final_assessment_text = raw_answer # For now, directly use it.
-                                         # In a real scenario, you might format it or summarize if too long.
-    else: # Plan execution flow
+    is_direct_flow = state.get("is_direct_qa_flow", False) 
+    final_content_to_present = state.get("executor_output", "No direct answer or tool output was generated.")
+
+    if is_direct_flow and state.get("direct_tool_request_error"):
+        final_content_to_present = f"Error in direct tool request: {state.get('direct_tool_request_error')}\nFallback output: {final_content_to_present}"
+        logger.warning(f"OverallEvaluatorNode: Direct tool request had an error: {state.get('direct_tool_request_error')}")
+    elif not is_direct_flow : # Plan execution flow
         logger.info(f"OverallEvaluatorNode: Processing plan execution outcome.")
         logger.info(f"Accumulated Plan Summary for Eval:\n{state.get('accumulated_plan_summary')}")
-        # For plans, this node would typically use an LLM to assess the overall plan success
-        # based on accumulated_plan_summary and the final executor_output from the last step.
-        # For placeholder, use a default message.
-        final_assessment_text = state.get("executor_output", "Plan execution completed. See logs for details.")
-
-    # Use an LLM to "finalize" the assessment_text. This LLM call will trigger the WebSocketCallbackHandler.
-    llm_id_str = state.get("evaluator_llm_id") # Use evaluator's LLM for this
-    if not llm_id_str:
-        logger.warning("OverallEvaluatorNode: evaluator_llm_id not found in state. Using system default.")
-        provider = settings.evaluator_provider
-        model_name = settings.evaluator_model_name
-    else:
+        # For plan, final_content_to_present is already the last step's output or overall summary
+    
+    logger.info(f"OverallEvaluatorNode: Content to potentially present to LLM: {final_content_to_present[:200]}...")
+    
+    llm_id_str = state.get("evaluator_llm_id") 
+    provider = settings.evaluator_provider 
+    model_name = settings.evaluator_model_name 
+    if llm_id_str:
         try: provider, model_name = llm_id_str.split("::", 1)
         except ValueError:
             logger.warning(f"OverallEvaluatorNode: Invalid LLM ID format '{llm_id_str}'. Using system default.")
-            provider = settings.evaluator_provider
-            model_name = settings.evaluator_model_name
+    else:
+        logger.warning("OverallEvaluatorNode: evaluator_llm_id not found in state. Using system default.")
             
     logger.info(f"OverallEvaluatorNode: Using LLM {provider}::{model_name} to finalize output.")
     try:
         finalizing_llm = get_llm(settings, provider=provider, model_name=model_name, requested_for_role="OverallEvaluator_Finalize")
         
-        # The prompt asks the LLM to essentially echo the input, ensuring an LLM call happens.
-        # The WebSocketCallbackHandler's on_llm_end will pick up this invocation's result.
-        prompt = ChatPromptTemplate.from_template("Present the following information as the agent's final response: {assessment_text}")
+        # --- MODIFICATION START: Conditional Prompting ---
+        prompt_template_str = "Present the following information as the agent's final response: {assessment_text}" # Default
+        
+        # Check if the content came from a 'read_file' tool in a direct tool request
+        is_read_file_direct_request = (
+            state.get("classified_intent") == "DIRECT_TOOL_REQUEST" and
+            state.get("identified_tool_name") == "read_file"
+        )
+
+        if is_read_file_direct_request:
+            logger.info("OverallEvaluatorNode: Detected 'read_file' output for direct tool request. Using specific presentation prompt.")
+            
+            MAX_FILE_CONTENT_DISPLAY_LENGTH = 15000 # Max characters to show from file directly to LLM for presentation
+            original_length = len(final_content_to_present)
+
+            if original_length > MAX_FILE_CONTENT_DISPLAY_LENGTH:
+                final_content_to_present = final_content_to_present[:MAX_FILE_CONTENT_DISPLAY_LENGTH] + \
+                                           f"\n\n[... Content truncated by agent. Original length: {original_length} characters. Full content available in workspace file.]"
+                logger.info(f"OverallEvaluatorNode: Truncated 'read_file' content for LLM presentation. Original: {original_length}, Truncated: {len(final_content_to_present)}")
+
+            prompt_template_str = (
+                "The user requested to read a file. The content (or a truncated version if it was very long) is provided below. "
+                "Present this content directly as the agent's response. Avoid conversational additions unless the content itself is conversational. "
+                "If the content is code or structured data, preserve its formatting as much as possible using Markdown code blocks if appropriate.\n\n"
+                "File Content:\n---\n{assessment_text}\n---"
+            )
+        # --- MODIFICATION END ---
+        
+        prompt = ChatPromptTemplate.from_template(prompt_template_str)
         chain = prompt | finalizing_llm
         
-        # The result of this chain.ainvoke will be an AIMessage (or similar, depending on LLM)
-        # and the callback handler will send its content as "agent_message"
-        logger.info(f"OverallEvaluatorNode: Invoking LLM to finalize assessment: '{final_assessment_text[:100]}...'")
-        final_response_message_obj = await chain.ainvoke({"assessment_text": final_assessment_text}, config=config)
+        logger.info(f"OverallEvaluatorNode: Invoking LLM to finalize assessment (snippet): '{final_content_to_present[:100]}...'")
+        final_response_message_obj = await chain.ainvoke({"assessment_text": final_content_to_present}, config=config) 
         
-        # The actual sending to UI is done by WebSocketCallbackHandler.
-        # We just update the state here for completeness or if other parts of the graph need it.
         final_content_for_state = final_response_message_obj.content if hasattr(final_response_message_obj, 'content') else str(final_response_message_obj)
-        logger.info(f"OverallEvaluatorNode: Finalized response for state: {final_content_for_state[:200]}...")
+        logger.info(f"OverallEvaluatorNode: Finalized response for state (snippet): {final_content_for_state[:200]}...")
         return {"overall_evaluator_output": {"assessment": final_content_for_state, "overall_success": True}}
 
     except Exception as e:
         logger.error(f"OverallEvaluatorNode: Error during final LLM invocation: {e}", exc_info=True)
-        # Fallback: Send the un-finalized text if LLM fails, though callback won't be ideal.
-        # This case is problematic as the UI might not get the message correctly.
-        # For robustness, the callback handler should also have a way to send raw text if needed.
-        # For now, we rely on the LLM call succeeding.
-        return {"overall_evaluator_output": {"assessment": f"Error finalizing response: {final_assessment_text}", "overall_success": False}}
+        # Fallback: use the raw content without LLM finalization if LLM fails
+        return {"overall_evaluator_output": {"assessment": f"Error finalizing response. Original content: {final_content_to_present}", "overall_success": False}}
 
 
 # --- Conditional Edge Logic ---
-def should_proceed_to_plan_or_qa(state: ResearchAgentState, config: RunnableConfig) -> str:
-    logger.info("--- DECISION: Plan or Direct QA? ---")
+def should_proceed_to_plan_or_qa_or_tool(state: ResearchAgentState, config: RunnableConfig) -> str: 
+    logger.info("--- DECISION: Plan, Direct QA, or Direct Tool Request? ---")
     intent = state.get("classified_intent")
     if intent == "PLAN":
         logger.info(f"Intent is '{intent}', proceeding to Planner.")
         return "planner"
+    elif intent == "DIRECT_TOOL_REQUEST":
+        logger.info(f"Intent is '{intent}', proceeding to Direct Tool Executor.")
+        return "direct_tool_executor" 
     elif intent == "DIRECT_QA":
-        logger.info(f"Intent is '{intent}', proceeding to Direct QA.")
+        logger.info(f"Intent is '{intent}', proceeding to Direct QA (LLM only).")
         return "direct_qa"
     else:
         logger.warning(f"Unknown intent '{intent}', defaulting to Direct QA.")
-        return "direct_qa"
+        return "direct_qa" 
 
 def should_retry_step_or_proceed(state: ResearchAgentState, config: RunnableConfig) -> str:
     logger.info("--- DECISION: Step Outcome - Retry, Next Step, or Evaluate Overall? ---")
@@ -255,16 +306,17 @@ def should_retry_step_or_proceed(state: ResearchAgentState, config: RunnableConf
             return "evaluate_overall_plan"
     else:
         logger.info("Step succeeded. Checking for more steps in the plan.")
-        plan = state.get("plan_steps", [])
+        plan_steps = state.get("plan_steps", []) # Ensure plan_steps is treated as a list
         current_idx = state.get("current_step_index", -1)
-        if current_idx + 1 < len(plan):
+        # Check if plan_steps is not None and current_idx is valid before accessing length
+        if plan_steps and current_idx + 1 < len(plan_steps):
             logger.info(f"More steps exist. Will proceed to step {current_idx + 2} (index {current_idx + 1}).")
             return "next_step"
         else:
-            logger.info("No more steps in plan. Proceeding to overall plan evaluation.")
+            logger.info("No more steps in plan or plan_steps is empty/None. Proceeding to overall plan evaluation.")
             return "evaluate_overall_plan"
 
-# --- Utility nodes for state updates ---
+# --- Utility nodes for state updates (for PLAN path) ---
 def increment_retry_count_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
     logger.info(">>> UTILITY NODE: Incrementing Retry Count")
     current_retries = state.get("retry_count_for_current_step", 0)
@@ -277,37 +329,36 @@ def advance_to_next_step_node(state: ResearchAgentState, config: RunnableConfig)
 
 # --- Graph Definition Function ---
 def create_research_agent_graph():
-    """
-    Builds and compiles the LangGraph research agent.
-    """
     logger.info("Building Research Agent Graph...")
     workflow = StateGraph(ResearchAgentState)
 
-    # Add Nodes
-    workflow.add_node("intent_classifier", intent_classifier_node) # Using the more functional version
-    workflow.add_node("direct_qa", direct_qa_node)                 # Using the new functional version
-    workflow.add_node("planner", placeholder_planner_node)
-    workflow.add_node("controller", placeholder_controller_node)
-    workflow.add_node("executor", placeholder_executor_node)
-    workflow.add_node("step_evaluator", placeholder_step_evaluator_node)
-    workflow.add_node("overall_evaluator", overall_evaluator_node) # Using the adapted version
+    workflow.add_node("intent_classifier", intent_classifier_node)
+    workflow.add_node("direct_qa", direct_qa_node) 
+    workflow.add_node("direct_tool_executor", direct_tool_executor_node) 
+    workflow.add_node("planner", placeholder_planner_node) 
+    workflow.add_node("controller", placeholder_controller_node) 
+    workflow.add_node("executor", placeholder_executor_node) 
+    workflow.add_node("step_evaluator", placeholder_step_evaluator_node) 
+    workflow.add_node("overall_evaluator", overall_evaluator_node)
     
     workflow.add_node("increment_retry_count", increment_retry_count_node)
     workflow.add_node("advance_to_next_step", advance_to_next_step_node)
 
-    # --- Define Edges ---
     workflow.set_entry_point("intent_classifier")
 
     workflow.add_conditional_edges(
         "intent_classifier",
-        should_proceed_to_plan_or_qa,
-        {"planner": "planner", "direct_qa": "direct_qa"}
+        should_proceed_to_plan_or_qa_or_tool, 
+        {
+            "planner": "planner", 
+            "direct_tool_executor": "direct_tool_executor", 
+            "direct_qa": "direct_qa"
+        }
     )
 
-    # Path for Direct QA: direct_qa_node's output (raw text) goes to overall_evaluator
     workflow.add_edge("direct_qa", "overall_evaluator") 
+    workflow.add_edge("direct_tool_executor", "overall_evaluator") 
 
-    # Path for Planning
     workflow.add_edge("planner", "controller")
     workflow.add_edge("controller", "executor")
     workflow.add_edge("executor", "step_evaluator")
@@ -322,8 +373,8 @@ def create_research_agent_graph():
         }
     )
     
-    workflow.add_edge("increment_retry_count", "controller")
-    workflow.add_edge("advance_to_next_step", "controller")
+    workflow.add_edge("increment_retry_count", "controller") 
+    workflow.add_edge("advance_to_next_step", "controller") 
 
     workflow.add_edge("overall_evaluator", END)
 
@@ -332,7 +383,6 @@ def create_research_agent_graph():
     logger.info("Research Agent Graph compiled successfully.")
     return app
 
-# --- Create and export the compiled graph instance ---
 research_agent_graph = create_research_agent_graph()
 logger.info(f"Module-level variable 'research_agent_graph' (compiled graph app) created. Type: {type(research_agent_graph)}")
 
@@ -342,5 +392,5 @@ if __name__ == "__main__":
         format='%(asctime)s - %(levelname)s - %(name)s [%(module)s.%(funcName)s:%(lineno)d] - %(message)s'
     )
     logger.info("Running langgraph_agent.py directly for testing graph compilation and structure.")
-    # ... (optional __main__ test block) ...
-    logger.info("langgraph_agent.py (Part 2) finished execution if run as __main__.")
+    logger.info("langgraph_agent.py finished execution if run as __main__.")
+

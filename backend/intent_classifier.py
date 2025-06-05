@@ -1,3 +1,4 @@
+# backend/intent_classifier.py
 import logging
 from typing import Dict, Any, Optional
 
@@ -14,26 +15,74 @@ class IntentClassificationOutput(BaseModel):
     """
     Defines the structured output for the Intent Classifier LLM.
     """
-    intent: str = Field(description="The classified intent. Must be one of ['PLAN', 'DIRECT_QA'].")
+    intent: str = Field(description="The classified intent. Must be one of ['PLAN', 'DIRECT_QA', 'DIRECT_TOOL_REQUEST'].")
     reasoning: Optional[str] = Field(description="Brief reasoning for the classification.", default=None)
+    identified_tool_name: Optional[str] = Field(
+        description="If intent is 'DIRECT_TOOL_REQUEST', the exact name of the tool identified from the 'Available Tools' list. Otherwise null.",
+        default=None
+    )
+    extracted_tool_input: Optional[str] = Field(
+        description="If intent is 'DIRECT_TOOL_REQUEST', the precise, complete input string for the identified tool. Otherwise null.",
+        default=None
+    )
 
-INTENT_CLASSIFIER_SYSTEM_PROMPT_TEMPLATE = """You are an expert AI assistant responsible for classifying user intent.
-Your goal is to determine if a user's query requires a multi-step plan involving tools and complex reasoning, or if it's a simple question/statement that can be answered directly or via a single tool use (like a quick web search).
+INTENT_CLASSIFIER_SYSTEM_PROMPT_TEMPLATE = """You are an expert AI assistant responsible for classifying user intent and extracting information for direct tool use.
+Your goal is to determine if a user's query requires:
+1.  A multi-step plan ("PLAN").
+2.  A simple direct answer without tools ("DIRECT_QA").
+3.  A direct request to use a specific tool ("DIRECT_TOOL_REQUEST").
 
 Available intents:
--   "PLAN": Use this if the query implies a multi-step process, requires breaking down into sub-tasks, involves creating or manipulating multiple pieces of data, or clearly needs a sequence of tool uses. Examples:
+-   "PLAN": Use this if the query implies a multi-step process, requires breaking down into sub-tasks, involves creating or manipulating multiple pieces of data, or clearly needs a sequence of tool uses where the tools are NOT explicitly named or the input is not straightforward. Examples:
     - "Research the latest treatments for X, summarize them, and write a report."
     - "Find three recent news articles about Y, extract key points from each, and compare them."
     - "Download the data from Z, process it, and generate a plot."
--   "DIRECT_QA": Use this if the query is a straightforward question, a request for a simple definition or explanation, a request for brainstorming, a simple calculation, or a conversational remark that doesn't require a complex plan. The agent can likely answer this using its internal knowledge or a single quick tool use (like a web search for a current fact). Examples:
+    - "Write a poem about stars and save it to 'poem.txt'." (Involves generation then a tool)
+-   "DIRECT_QA": Use this if the query is a straightforward question, a request for a simple definition or explanation, a request for brainstorming, a simple calculation, or a conversational remark that doesn't require a complex plan or explicit tool. The agent can likely answer this using its internal knowledge. Examples:
     - "What is the capital of France?"
     - "Explain the concept of X in simple terms."
     - "Tell me a fun fact."
-    - "What's the weather like today?" (implies a single tool use)
-    - "Can you help me brainstorm ideas for a project about Y?"
     - "Thanks, that was helpful!"
+-   "DIRECT_TOOL_REQUEST": Use this if the query explicitly and clearly asks to use a specific tool for a single, direct action, and the input for that tool is evident in the query.
+    You MUST match the requested action to one of the "Available Tools" listed below.
+    - If a match is found:
+        - `intent` should be "DIRECT_TOOL_REQUEST".
+        - `identified_tool_name` should be the EXACT name of the tool from the "Available Tools" list.
+        - `extracted_tool_input` should be the PRECISE and COMPLETE input string that the identified tool expects, based on its description and the user's query. Ensure the input format matches the tool's requirements (e.g., for 'write_file', it's 'filepath:::content').
+    - Examples:
+        - User: "Use tavily_search_api to find recent news on AI in healthcare."
+            - intent: "DIRECT_TOOL_REQUEST"
+            - identified_tool_name: "tavily_search_api"
+            - extracted_tool_input: (JSON string) "{{\"query\": \"recent news on AI in healthcare\"}}"
+        - User: "Read the file 'summary.txt' from my workspace."
+            - intent: "DIRECT_TOOL_REQUEST"
+            - identified_tool_name: "read_file"
+            - extracted_tool_input: "summary.txt"
+        - User: "Write 'Hello World' into a file named 'greeting.txt'."
+            - intent: "DIRECT_TOOL_REQUEST"
+            - identified_tool_name: "write_file"
+            - extracted_tool_input: "greeting.txt:::Hello World"
+        - User: "Perform a pubmed search for 'cancer immunotherapy reviews max_results=3'."
+            - intent: "DIRECT_TOOL_REQUEST"
+            - identified_tool_name: "pubmed_search"
+            - extracted_tool_input: "cancer immunotherapy reviews max_results=3"
 
-Consider the complexity and the likely number of distinct operations or tool uses implied by the query.
+**Available Tools (for DIRECT_TOOL_REQUEST matching):**
+{available_tools_summary}
+
+**Input Formatting Notes for Specific Tools (for DIRECT_TOOL_REQUEST):**
+- `tavily_search_api`: Input is a JSON string, e.g., '{{"query": "search terms", "max_results": 5}}'.
+- `web_page_reader`: Input is a single URL string.
+- `write_file`: Input is 'relative_file_path:::text_content'.
+- `read_file`: Input is 'relative_file_path'.
+- `workspace_shell`: Input is a shell command string.
+- `pubmed_search`: Input is a query string, optionally with ' max_results=N'.
+- `deep_research_synthesizer`: Input is a JSON string, e.g., '{{"query": "research topic"}}'.
+- `Python_REPL`: Input is a Python code string.
+- `python_package_installer`: Input is a package name string.
+
+Consider the complexity. If a query mentions a tool but requires prior steps (e.g., "Generate a summary and then write it to summary.txt"), it's a "PLAN".
+If the query is vague about the tool or input, or seems to imply multiple operations even if a tool is named, prefer "PLAN".
 
 Respond with a single JSON object matching the following schema:
 {format_instructions}
@@ -43,23 +92,23 @@ Do not include any preamble or explanation outside of the JSON object.
 
 async def classify_intent(
     user_query: str,
-    session_data_entry: Dict[str, Any], # Added to get LLM override
-    available_tools_summary: Optional[str] = None
-) -> str: # Ensure return type is str
+    session_data_entry: Dict[str, Any], # To get LLM override
+    available_tools_summary: str # MODIFIED: Added this parameter
+) -> IntentClassificationOutput: # MODIFIED: Return type
     """
-    Classifies the user's intent as either requiring a plan or direct Q&A.
+    Classifies the user's intent and extracts tool info if applicable.
     Fetches its own LLM based on settings and session overrides.
 
     Args:
         user_query: The user's input query.
         session_data_entry: The session data containing potential LLM overrides.
-        available_tools_summary: An optional summary of available tools for context.
+        available_tools_summary: A string summary of available tools and their descriptions.
 
     Returns:
-        A string representing the classified intent (e.g., "PLAN", "DIRECT_QA").
-        Defaults to "PLAN" if classification fails or is uncertain.
+        An IntentClassificationOutput Pydantic model instance.
     """
     logger.info(f"IntentClassifier: Classifying intent for query: {user_query[:100]}...")
+    logger.debug(f"IntentClassifier: Tools summary provided: {available_tools_summary[:200]}...")
 
     intent_llm_id_override = session_data_entry.get("session_intent_classifier_llm_id")
     provider = settings.intent_classifier_provider
@@ -68,7 +117,7 @@ async def classify_intent(
     if intent_llm_id_override:
         try:
             override_provider, override_model_name = intent_llm_id_override.split("::", 1)
-            if override_provider and override_model_name: # Basic check
+            if override_provider and override_model_name: 
                 provider = override_provider
                 model_name = override_model_name
                 logger.info(f"IntentClassifier: Using session override LLM: {provider}::{model_name}")
@@ -77,30 +126,27 @@ async def classify_intent(
         except ValueError:
             logger.warning(f"IntentClassifier: Could not parse session LLM ID '{intent_llm_id_override}'. Using system default for Intent Classifier.")
 
-
     try:
         intent_llm: BaseChatModel = get_llm(
             settings,
             provider=provider,
             model_name=model_name,
-            requested_for_role="INTENT_CLASSIFIER" # Added role for clarity in logs
+            requested_for_role="INTENT_CLASSIFIER"
         )
         logger.info(f"IntentClassifier: Using LLM {provider}::{model_name}")
     except Exception as e:
         logger.error(f"IntentClassifier: Failed to initialize LLM for intent classification: {e}", exc_info=True)
         logger.warning("IntentClassifier: Defaulting to 'PLAN' intent due to LLM initialization error.")
-        return "PLAN"
+        return IntentClassificationOutput(intent="PLAN", reasoning="LLM initialization error.")
 
     parser = JsonOutputParser(pydantic_object=IntentClassificationOutput)
     format_instructions = parser.get_format_instructions()
 
-    human_template = "User Query: \"{user_query}\"\n"
-    if available_tools_summary:
-        human_template += "\nFor context, the agent has access to tools like: {available_tools_summary}\n"
-    human_template += "\nClassify the intent of the user query."
+    # MODIFIED: Include available_tools_summary in the prompt
+    human_template = "User Query: \"{user_query}\"\nClassify the intent of the user query based on the system instructions and provided tool summary."
 
     prompt = ChatPromptTemplate.from_messages([
-        ("system", INTENT_CLASSIFIER_SYSTEM_PROMPT_TEMPLATE),
+        ("system", INTENT_CLASSIFIER_SYSTEM_PROMPT_TEMPLATE), # Tools summary is in system prompt
         ("human", human_template)
     ])
     chain = prompt | intent_llm | parser
@@ -108,53 +154,62 @@ async def classify_intent(
     try:
         invoke_params = {
             "user_query": user_query,
-            "format_instructions": format_instructions
+            "format_instructions": format_instructions,
+            "available_tools_summary": available_tools_summary # Pass it to the prompt
         }
-        if available_tools_summary:
-            invoke_params["available_tools_summary"] = available_tools_summary
 
-        # The chain with JsonOutputParser should return a dictionary
-        # or the Pydantic model instance directly if configured.
-        # Let's assume it returns a dictionary that needs to be parsed into the Pydantic model.
-        classification_result_data = await chain.ainvoke(invoke_params)
+        classification_result_dict = await chain.ainvoke(invoke_params)
 
-        # Ensure we have the Pydantic model instance
-        if isinstance(classification_result_data, IntentClassificationOutput):
-            classified_output_model = classification_result_data
-        elif isinstance(classification_result_data, dict):
-            classified_output_model = IntentClassificationOutput(**classification_result_data)
+        # The parser should now return the Pydantic model directly if `pydantic_object` is set.
+        # If it returns a dict, we construct the model.
+        if isinstance(classification_result_dict, IntentClassificationOutput):
+            classified_output = classification_result_dict
+        elif isinstance(classification_result_dict, dict):
+            classified_output = IntentClassificationOutput(**classification_result_dict)
         else:
-            logger.error(f"IntentClassifier: LLM chain returned unexpected type: {type(classification_result_data)}. Output: {str(classification_result_data)[:200]}")
+            logger.error(f"IntentClassifier: LLM chain returned unexpected type: {type(classification_result_dict)}. Output: {str(classification_result_dict)[:200]}")
             logger.warning("IntentClassifier: Defaulting to 'PLAN' due to unexpected output type.")
-            return "PLAN"
+            return IntentClassificationOutput(intent="PLAN", reasoning="LLM returned unexpected output type.")
 
-        intent_str = classified_output_model.intent.upper()
-        reasoning_str = classified_output_model.reasoning or "No reasoning provided."
+        # Validate intent value
+        valid_intents = ["PLAN", "DIRECT_QA", "DIRECT_TOOL_REQUEST"]
+        if classified_output.intent.upper() not in valid_intents:
+            logger.warning(f"IntentClassifier: LLM returned an unknown intent value '{classified_output.intent}'. Defaulting to 'PLAN'.")
+            classified_output.intent = "PLAN"
+            classified_output.reasoning = f"Original intent '{classified_output.intent}' was invalid, defaulted to PLAN. {classified_output.reasoning or ''}".strip()
+            classified_output.identified_tool_name = None # Clear tool info if intent changed
+            classified_output.extracted_tool_input = None
+
+        # If it's a DIRECT_TOOL_REQUEST, ensure tool name and input are somewhat present
+        if classified_output.intent.upper() == "DIRECT_TOOL_REQUEST":
+            if not classified_output.identified_tool_name:
+                logger.warning(f"IntentClassifier: Intent is DIRECT_TOOL_REQUEST but identified_tool_name is missing. Query: '{user_query}'. Reasoning: '{classified_output.reasoning}'. Changing to PLAN.")
+                classified_output.intent = "PLAN"
+                classified_output.reasoning = f"DIRECT_TOOL_REQUEST identified, but no tool name extracted. Changed to PLAN. {classified_output.reasoning or ''}".strip()
+                classified_output.identified_tool_name = None
+                classified_output.extracted_tool_input = None # Also clear input
+            # extracted_tool_input can sometimes be legitimately None or empty (e.g. a tool that takes no args)
+            # so we don't strictly enforce its presence here, the tool itself will validate.
+
+        logger.info(f"IntentClassifier: Classified intent as '{classified_output.intent}'. "
+                    f"Tool: '{classified_output.identified_tool_name}', Input: '{str(classified_output.extracted_tool_input)[:50]}...'. "
+                    f"Reasoning: {classified_output.reasoning}")
         
-        # This log is internal to intent_classifier.py
-        logger.info(f"IntentClassifier: Internally classified intent as '{intent_str}'. Reasoning: {reasoning_str}")
-
-        if intent_str in ["PLAN", "DIRECT_QA"]:
-            return intent_str  # CRITICAL: Return ONLY the intent string
-        else:
-            logger.warning(f"IntentClassifier: LLM returned an unknown intent value '{intent_str}'. Defaulting to 'PLAN'.")
-            return "PLAN"
+        return classified_output
 
     except Exception as e:
         logger.error(f"IntentClassifier: Error during intent classification: {e}", exc_info=True)
-        # Attempt to get raw output for debugging if parsing failed
         try:
             error_chain = prompt | intent_llm | StrOutputParser()
             raw_output_params = {
                 "user_query": user_query,
-                "format_instructions": format_instructions # Still include for prompt consistency
+                "format_instructions": format_instructions,
+                "available_tools_summary": available_tools_summary
             }
-            if available_tools_summary:
-                raw_output_params["available_tools_summary"] = available_tools_summary
             raw_output = await error_chain.ainvoke(raw_output_params)
-            logger.error(f"IntentClassifier: Raw LLM output on error: {raw_output[:500]}...") # Log first 500 chars
+            logger.error(f"IntentClassifier: Raw LLM output on error: {raw_output[:500]}...")
         except Exception as raw_e:
             logger.error(f"IntentClassifier: Failed to get raw LLM output during error: {raw_e}")
         logger.warning("IntentClassifier: Defaulting to 'PLAN' intent due to classification error.")
-        return "PLAN"
+        return IntentClassificationOutput(intent="PLAN", reasoning=f"Classification error: {e}")
 

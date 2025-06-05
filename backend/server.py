@@ -641,6 +641,7 @@ async def handler(websocket: Any): # websocket: websockets.WebSocketServerProtoc
         "get_available_models": process_get_available_models,
         "cancel_agent": process_cancel_agent,
         "get_artifacts_for_task": process_get_artifacts_for_task,
+        "trigger_artifact_refresh": process_get_artifacts_for_task,
         "run_command": process_run_command, # For direct shell commands
         "action_command": process_action_command, # For UITL actions
         "set_session_role_llm": process_set_session_role_llm, # Handles role-specific LLM overrides

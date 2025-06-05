@@ -17,80 +17,61 @@ from langchain_core.documents import Document
 
 # Project Imports
 from backend.config import settings
-# from backend.tools import TEXT_EXTENSIONS, get_task_workspace_path # Not directly used in this version of callbacks
 
 if TYPE_CHECKING:
-    from langchain_core.tracers.schemas import Run # For type hinting run_manager if used
+    from langchain_core.tracers.schemas import Run 
 
 logger = logging.getLogger(__name__)
 
-# --- Define Custom Exception for Cancellation ---
 class AgentCancelledException(Exception):
     """Custom exception to signal agent cancellation via callbacks."""
     pass
-# ---------------------------------------------
 
-# Define type hints
 AddMessageFunc = Callable[[str, str, str, str], Coroutine[Any, Any, None]]
 SendWSMessageFunc = Callable[[str, Any], Coroutine[Any, Any, None]]
 
-
-# --- ADDED: For more structured logging, especially with callback info ---
-# These constants can be used in the component_hint field or similar
+# --- START: RESTORED/ADDED CONSTANTS for UI message handling from task_handlers.py ---
 LOG_SOURCE_SYSTEM = "SYSTEM"
-LOG_SOURCE_INTENT_CLASSIFIER = "INTENT_CLASSIFIER"
-LOG_SOURCE_PLANNER = "PLANNER"
-LOG_SOURCE_CONTROLLER = "CONTROLLER"
-LOG_SOURCE_EXECUTOR = "EXECUTOR"
-LOG_SOURCE_EVALUATOR_STEP = "EVALUATOR_STEP"
-LOG_SOURCE_EVALUATOR_OVERALL = "EVALUATOR_OVERALL"
-LOG_SOURCE_TOOL_INTERNAL = "TOOL_INTERNAL_LLM" # e.g., for LLM calls within a tool
-LOG_SOURCE_LLM_CORE = "LLM_CORE" # Generic LLM calls not tied to a specific agent component
-LOG_SOURCE_CALLBACK_HANDLER = "CALLBACK_HANDLER" # For logs originating from this handler itself
+# (other LOG_SOURCE constants if needed, e.g., from previous versions or for future use)
+# LOG_SOURCE_INTENT_CLASSIFIER = "INTENT_CLASSIFIER"
+# LOG_SOURCE_PLANNER = "PLANNER"
+# LOG_SOURCE_CONTROLLER = "CONTROLLER"
+# LOG_SOURCE_EXECUTOR = "EXECUTOR"
+# LOG_SOURCE_EVALUATOR_STEP = "EVALUATOR_STEP"
+# LOG_SOURCE_EVALUATOR_OVERALL = "EVALUATOR_OVERALL"
+# LOG_SOURCE_TOOL_INTERNAL = "TOOL_INTERNAL_LLM"
+# LOG_SOURCE_LLM_CORE = "LLM_CORE"
+# LOG_SOURCE_CALLBACK_HANDLER = "CALLBACK_HANDLER" 
 
-# --- MODIFIED: Callback log message type constants ---
-# Standard agent output message
 AGENT_MESSAGE_TYPE_FINAL_ANSWER = "agent_message"
-# Agent "thinking" or intermediate status updates
 AGENT_MESSAGE_TYPE_THINKING_UPDATE = "agent_thinking_update"
-# More structured status/progress update from agent components (sub-statuses)
-SUB_TYPE_SUB_STATUS = "sub_status"
-# Agent's internal "thought" process (can be multi-line, Markdown)
-SUB_TYPE_THOUGHT = "thought"
-# Used when a tool's output needs to be displayed directly in chat (e.g., file content)
-SUB_TYPE_TOOL_RESULT_FOR_CHAT = "tool_result_for_chat"
-# Plan step announcements
-AGENT_MESSAGE_TYPE_MAJOR_STEP_ANNOUNCEMENT = "agent_major_step_announcement"
 
-# Database message types (can mirror some of the above or be more specific)
+# Constants for structured 'thinking_update' messages, primarily for UI rendering
+SUB_TYPE_SUB_STATUS = "sub_status"  # For brief textual status updates from a component
+SUB_TYPE_THOUGHT = "thought"        # For more detailed, potentially multi-line thoughts/reasoning
+SUB_TYPE_TOOL_RESULT_FOR_CHAT = "tool_result_for_chat" # If a tool's direct output should go to chat UI
+
+# Constants for DB message types, can mirror UI types or be more granular
 DB_MSG_TYPE_USER_INPUT = "user_input"
-DB_MSG_TYPE_AGENT_FINAL_ANSWER = AGENT_MESSAGE_TYPE_FINAL_ANSWER # Align with UI
-DB_MSG_TYPE_SYSTEM_EVENT = "system_event" # Generic system messages
-DB_MSG_TYPE_ERROR = "error_log" # General errors
+DB_MSG_TYPE_AGENT_FINAL_ANSWER = AGENT_MESSAGE_TYPE_FINAL_ANSWER
+DB_MSG_TYPE_SYSTEM_EVENT = "system_event"
+DB_MSG_TYPE_ERROR = "error_log" # General errors from agent/system
 DB_MSG_TYPE_LLM_TOKEN_USAGE = "llm_token_usage"
 DB_MSG_TYPE_ARTIFACT_GENERATED = "artifact_generated"
 DB_MSG_TYPE_TOOL_INPUT = "tool_input"
 DB_MSG_TYPE_TOOL_OUTPUT = "tool_output"
-DB_MSG_TYPE_AGENT_THOUGHT_ACTION = "agent_thought_action" # Legacy, from ReAct agent
-DB_MSG_TYPE_MONITOR_LOG_PREFIX = "monitor_" # Generic prefix for monitor logs
-DB_MSG_TYPE_SUB_STATUS = "db_sub_status" # For storing structured sub_status updates
-DB_MSG_TYPE_THOUGHT = "db_thought" # For storing structured thought updates
-DB_MSG_TYPE_TOOL_RESULT_FOR_CHAT = "db_tool_result_for_chat" # For storing tool results sent to chat
-DB_MSG_TYPE_CONFIRMED_PLAN_LOG = "confirmed_plan_log" # To store the confirmed plan
+DB_MSG_TYPE_AGENT_THOUGHT_ACTION = "agent_thought_action" # From legacy ReAct agent
+
+# DB types for structured thinking/status updates, corresponding to SUB_TYPE_ constants
+DB_MSG_TYPE_SUB_STATUS = "db_sub_status"
+DB_MSG_TYPE_THOUGHT = "db_thought"
+DB_MSG_TYPE_TOOL_RESULT_FOR_CHAT = "db_tool_result_for_chat"
+DB_MSG_TYPE_CONFIRMED_PLAN_LOG = "confirmed_plan_log"
 DB_MSG_TYPE_MAJOR_STEP_ANNOUNCEMENT = "db_major_step_announcement"
+# --- END: RESTORED/ADDED CONSTANTS ---
 
 
 class WebSocketCallbackHandler(AsyncCallbackHandler):
-    """
-    Async Callback handler for LangChain agent events.
-    - Sends thinking status updates to the chat UI.
-    - Sends final agent messages to the chat UI (adapted for LangGraph).
-    - Sends monitor logs for all steps.
-    - Extracts and sends LLM token usage.
-    - Handles cancellation requests.
-    - Logs artifact creation from write_file and triggers UI refresh (if tool callbacks are re-enabled).
-    - Saves relevant events to the database.
-    """
     always_verbose: bool = True
     ignore_llm: bool = False 
     ignore_chain: bool = False 
@@ -130,9 +111,7 @@ class WebSocketCallbackHandler(AsyncCallbackHandler):
             logger.warning(f"[{self.session_id}] Cannot save message type '{msg_type}' to DB: current_task_id not set.")
 
     def _check_cancellation(self, step_name: str):
-        # Critical debug log for initial check
         logger.critical(f"CRITICAL_DEBUG_CANCEL_CHECK: [{self.session_id}] _check_cancellation for '{step_name}' (Initial Check): cancellation_requested flag is currently {self.session_data.get(self.session_id, {}).get('cancellation_requested', False)}")
-
         if self.session_data and self.session_id in self.session_data:
             current_session_specific_data = self.session_data[self.session_id]
             if current_session_specific_data.get('cancellation_requested', False):
@@ -140,38 +119,29 @@ class WebSocketCallbackHandler(AsyncCallbackHandler):
                 raise AgentCancelledException("Cancellation requested by user.")
         else:
             logger.error(f"[{self.session_id}] Cannot check cancellation flag: Session data not found for session in shared dict.")
-        
         logger.critical(f"CRITICAL_DEBUG_CANCEL_CHECK: [{self.session_id}] _check_cancellation for '{step_name}' (Post-Yield Check): cancellation_requested flag is currently {self.session_data.get(self.session_id, {}).get('cancellation_requested', False)}")
-
 
     async def on_llm_start(self, serialized: Dict[str, Any], prompts: List[str], *, run_id: UUID, parent_run_id: Optional[UUID] = None, tags: Optional[List[str]] = None, metadata: Optional[Dict[str, Any]] = None, **kwargs: Any) -> None:
         try:
             self._check_cancellation("LLM execution")
-            self.active_langgraph_node_name = None 
+            current_node_from_tags_or_meta = "N/A"
             if tags:
                 for tag in tags:
                     if tag.startswith("langgraph:node:"):
-                        self.active_langgraph_node_name = tag.split("langgraph:node:", 1)[1]
-                        logger.debug(f"[{self.session_id}] on_llm_start: Active LangGraph node identified from tags: {self.active_langgraph_node_name}")
+                        current_node_from_tags_or_meta = tag.split("langgraph:node:", 1)[1]
                         break
-            if not self.active_langgraph_node_name and metadata and metadata.get("langgraph_node"): 
-                 self.active_langgraph_node_name = metadata.get("langgraph_node")
-                 logger.debug(f"[{self.session_id}] on_llm_start: Active LangGraph node identified from metadata: {self.active_langgraph_node_name}")
-
-            if self.active_langgraph_node_name == "overall_evaluator": 
-                self.is_final_evaluator_llm_active = True
-                logger.info(f"[{self.session_id}] LLM call started for OverallEvaluatorNode.")
-            else:
-                self.is_final_evaluator_llm_active = False
+            if current_node_from_tags_or_meta == "N/A" and metadata and metadata.get("langgraph_node"):
+                 current_node_from_tags_or_meta = metadata.get("langgraph_node")
+            
+            if current_node_from_tags_or_meta == "overall_evaluator":
+                logger.info(f"[{self.session_id}] on_llm_start: LLM call potentially for OverallEvaluatorNode (Node: {current_node_from_tags_or_meta}). is_final_evaluator_llm_active will be set by on_chat_model_start if it's a chat model.")
             
             logger.info(
-                f"[{self.session_id}] on_llm_start: Post-determination. "
-                f"Node: '{self.active_langgraph_node_name}', "
-                f"is_final_evaluator_llm_active: {self.is_final_evaluator_llm_active}"
+                f"[{self.session_id}] on_llm_start: Generic LLM start. "
+                f"Node (from tags/meta if avail): '{current_node_from_tags_or_meta}'"
             )
-
         except AgentCancelledException:
-            raise 
+            raise
 
     async def on_chat_model_start(
         self, serialized: Dict[str, Any], messages: List[List[BaseMessage]], *, run_id: UUID, parent_run_id: Optional[UUID] = None, tags: Optional[List[str]] = None, metadata: Optional[Dict[str, Any]] = None, **kwargs: Any
@@ -180,24 +150,22 @@ class WebSocketCallbackHandler(AsyncCallbackHandler):
             self._check_cancellation("Chat Model execution")
             
             self.active_langgraph_node_name = None 
-            current_node_name_for_log = "UnknownNode" 
             if tags:
                 for tag in tags:
                     if tag.startswith("langgraph:node:"):
                         self.active_langgraph_node_name = tag.split("langgraph:node:", 1)[1]
-                        current_node_name_for_log = self.active_langgraph_node_name
                         logger.debug(f"[{self.session_id}] on_chat_model_start: Active LangGraph node identified from tags: {self.active_langgraph_node_name}")
                         break
             if not self.active_langgraph_node_name and metadata and metadata.get("langgraph_node"):
                  self.active_langgraph_node_name = metadata.get("langgraph_node")
-                 current_node_name_for_log = self.active_langgraph_node_name
                  logger.debug(f"[{self.session_id}] on_chat_model_start: Active LangGraph node identified from metadata: {self.active_langgraph_node_name}")
 
             if self.active_langgraph_node_name == "overall_evaluator":
                 self.is_final_evaluator_llm_active = True
-                logger.info(f"[{self.session_id}] Chat model call started for OverallEvaluatorNode.")
+                logger.info(f"[{self.session_id}] Chat model call started for OverallEvaluatorNode. Setting is_final_evaluator_llm_active = TRUE.")
             else:
                 self.is_final_evaluator_llm_active = False
+                logger.info(f"[{self.session_id}] Chat model call for node '{self.active_langgraph_node_name}'. Setting is_final_evaluator_llm_active = FALSE.")
             
             logger.info(
                 f"[{self.session_id}] on_chat_model_start: Post-determination. "
@@ -221,20 +189,17 @@ class WebSocketCallbackHandler(AsyncCallbackHandler):
         role_hint_from_meta = kwargs.get("metadata", {}).get("role_hint", "LLM_CORE") 
         logger.info(
             f"[{self.session_id}] on_llm_end: Entered. "
-            f"Current active_langgraph_node_name (from self): '{self.active_langgraph_node_name}', "
-            f"Current is_final_evaluator_llm_active (from self): {self.is_final_evaluator_llm_active}"
+            f"Role Hint from metadata: '{role_hint_from_meta}', "
+            f"Current self.active_langgraph_node_name: '{self.active_langgraph_node_name}', "
+            f"Current self.is_final_evaluator_llm_active: {self.is_final_evaluator_llm_active}"
         )
-        logger.critical(f"CRITICAL_DEBUG: [{self.session_id}] on_llm_end: ENTERED for role_hint: {role_hint_from_meta}")
-
         log_prefix = self._get_log_prefix()
-        logger.debug(f"[{self.session_id}] on_llm_end (Role: {role_hint_from_meta}): Full response object type: {type(response)}") 
         
         input_tokens: Optional[int] = None; output_tokens: Optional[int] = None; total_tokens: Optional[int] = None
         model_name: str = "unknown_model"; source_for_tokens = "unknown"
 
         try:
             if response.llm_output and isinstance(response.llm_output, dict):
-                logger.debug(f"[{self.session_id}] on_llm_end (Role: {role_hint_from_meta}): response.llm_output IS DICT: {response.llm_output}")
                 llm_output_data = response.llm_output
                 source_for_tokens = "llm_output"
                 model_name = llm_output_data.get('model_name', llm_output_data.get('model', model_name))
@@ -251,27 +216,12 @@ class WebSocketCallbackHandler(AsyncCallbackHandler):
                 elif 'eval_count' in llm_output_data: 
                     output_tokens = llm_output_data.get('eval_count')
                     input_tokens = llm_output_data.get('prompt_eval_count')
-            else:
-                 logger.debug(f"[{self.session_id}] on_llm_end (Role: {role_hint_from_meta}): response.llm_output IS NONE or NOT DICT.")
 
             if (input_tokens is None and output_tokens is None) and response.generations:
-                logger.debug(f"[{self.session_id}] on_llm_end (Role: {role_hint_from_meta}): response.generations IS PRESENT and NOT EMPTY (length {len(response.generations)}).")
                 for gen_list_idx, gen_list in enumerate(response.generations):
-                    if not gen_list: logger.debug(f"DEBUG: Generation list {gen_list_idx} is empty for role {role_hint_from_meta}."); continue
-                    logger.debug(f"DEBUG: Generation list {gen_list_idx} (length {len(gen_list)}) for role {role_hint_from_meta}:")
+                    if not gen_list: continue
                     first_gen = gen_list[0]
                     source_for_tokens = "generations"
-                    logger.debug(f"DEBUG:   Item 0 type: {type(first_gen)}")
-                    if hasattr(first_gen, 'text'): logger.debug(f"DEBUG:     Item 0 text: {first_gen.text[:50]}...")
-                    if hasattr(first_gen, 'message'): 
-                        logger.debug(f"DEBUG:     Item 0 message type: {type(first_gen.message)}")
-                        if hasattr(first_gen.message, 'content'): logger.debug(f"DEBUG:       Item 0 message content: {first_gen.message.content[:50]}...")
-                        if hasattr(first_gen.message, 'additional_kwargs'): logger.debug(f"DEBUG:       Item 0 message additional_kwargs: {first_gen.message.additional_kwargs}")
-                        if hasattr(first_gen.message, 'usage_metadata'): logger.debug(f"DEBUG:       Item 0 message usage_metadata: {first_gen.message.usage_metadata}")
-                        if hasattr(first_gen.message, 'response_metadata'): logger.debug(f"DEBUG:       Item 0 message response_metadata: {first_gen.message.response_metadata}")
-
-                    if hasattr(first_gen, 'generation_info'): logger.debug(f"DEBUG:     Item 0 generation_info: {first_gen.generation_info}")
-
                     if hasattr(first_gen, 'message') and hasattr(first_gen.message, 'usage_metadata') and first_gen.message.usage_metadata:
                         usage_metadata = first_gen.message.usage_metadata
                         if isinstance(usage_metadata, dict):
@@ -284,30 +234,21 @@ class WebSocketCallbackHandler(AsyncCallbackHandler):
                             if (not model_name or model_name == "unknown_model") and first_gen.generation_info and isinstance(first_gen.generation_info, dict): 
                                 model_name_candidate = first_gen.generation_info.get('model_name', first_gen.generation_info.get('model', model_name))
                                 if model_name_candidate and model_name_candidate != "unknown_model": model_name = model_name_candidate
-
-                            logger.debug(f"[{self.session_id}] on_llm_end (Role: {role_hint_from_meta}): Tokens from generations.message.usage_metadata (Gemini/ChatChunk): In={input_tokens}, Out={output_tokens}, Total={total_tokens}, Model={model_name}")
                             break 
                     elif hasattr(first_gen, 'generation_info') and first_gen.generation_info:
                         gen_info = first_gen.generation_info
                         if isinstance(gen_info, dict):
                             model_name_candidate = gen_info.get('model', gen_info.get('model_name', model_name))
                             if model_name_candidate and model_name_candidate != "unknown_model": model_name = model_name_candidate
-
                             if 'token_usage' in gen_info and isinstance(gen_info['token_usage'], dict): 
                                 usage_dict = gen_info['token_usage']
                                 input_tokens = usage_dict.get('prompt_tokens', usage_dict.get('input_tokens'))
                                 output_tokens = usage_dict.get('completion_tokens', usage_dict.get('output_tokens'))
                                 total_tokens = usage_dict.get('total_tokens')
-                                logger.debug(f"[{self.session_id}] on_llm_end (Role: {role_hint_from_meta}): Tokens from generations.generation_info.token_usage (OpenAI): In={input_tokens}, Out={output_tokens}, Total={total_tokens}, Model={model_name}")
                             elif 'eval_count' in gen_info: 
                                 output_tokens = gen_info.get('eval_count')
                                 input_tokens = gen_info.get('prompt_eval_count')
-                                logger.debug(f"[{self.session_id}] on_llm_end (Role: {role_hint_from_meta}): Tokens from generations.generation_info (Ollama): In={input_tokens}, Out={output_tokens}, Model={model_name}")
                             break
-            else:
-                 logger.debug(f"[{self.session_id}] on_llm_end (Role: {role_hint_from_meta}): Tokens not found or incomplete in llm_output, AND response.generations is missing or empty.")
-
-
             input_tokens = int(input_tokens) if input_tokens is not None else 0
             output_tokens = int(output_tokens) if output_tokens is not None else 0
             if total_tokens is None: total_tokens = input_tokens + output_tokens
@@ -319,15 +260,12 @@ class WebSocketCallbackHandler(AsyncCallbackHandler):
                     "input_tokens": input_tokens, "output_tokens": output_tokens,
                     "total_tokens": total_tokens, "source": source_for_tokens
                 }
-                logger.debug(f"[{self.session_id}] on_llm_end (Role: {role_hint_from_meta}): Final parsed tokens before sending: In={input_tokens}, Out={output_tokens}, Total={total_tokens}, Model={model_name}, Source={source_for_tokens}")
                 usage_str = f"Model: {model_name}, Role: {role_hint_from_meta}, In: {input_tokens}, Out: {output_tokens}, Total: {total_tokens} (Src: {source_for_tokens})"
                 log_content_tokens = f"[LLM Token Usage] {usage_str}"
                 await self.send_ws_message("monitor_log", f"{log_prefix} {log_content_tokens}")
                 await self.send_ws_message("llm_token_usage", token_usage_payload)
                 await self._save_message(DB_MSG_TYPE_LLM_TOKEN_USAGE, json.dumps(token_usage_payload))
-                logger.info(f"[{self.session_id}] Sending 'llm_token_usage' message with payload: {token_usage_payload}")
-            else:
-                 logger.debug(f"[{self.session_id}] on_llm_end (Role: {role_hint_from_meta}): No valid token usage data found to send (all zero or None).")
+                logger.info(f"[{self.session_id}] Sent 'llm_token_usage' for Role {role_hint_from_meta}: {token_usage_payload}")
         except Exception as e:
             logger.error(f"[{self.session_id}] Error processing token usage in on_llm_end (Role: {role_hint_from_meta}): {e}", exc_info=True)
 
@@ -369,56 +307,63 @@ class WebSocketCallbackHandler(AsyncCallbackHandler):
         self.active_langgraph_node_name = None
 
     async def on_chain_start(self, serialized: Dict[str, Any], inputs: Dict[str, Any], *, run_id: UUID, parent_run_id: Optional[UUID] = None, tags: Optional[List[str]] = None, metadata: Optional[Dict[str, Any]] = None, **kwargs: Any) -> None:
-        chain_name = serialized.get("name", "UnknownChain") 
+        chain_name_from_serialized = serialized.get("name", "UnknownChain") 
+        
         node_name_from_tags = None
-        if tags:
+        if tags and isinstance(tags, list): 
             for tag in tags:
-                if tag.startswith("langgraph:node:"):
+                if isinstance(tag, str) and tag.startswith("langgraph:node:"): 
                     node_name_from_tags = tag.split("langgraph:node:", 1)[1]
                     break
         
-        effective_node_name = node_name_from_tags or chain_name 
+        effective_node_name = node_name_from_tags or chain_name_from_serialized
         
-        # --- START: MODIFIED SECTION ---
-        # Check if metadata is None before trying to access its attributes
-        is_langgraph_context = False
-        if metadata is not None: # Check if metadata is not None
+        is_langgraph_node_execution = False
+        if node_name_from_tags: 
+            is_langgraph_node_execution = True
+        elif metadata and isinstance(metadata, dict): 
             langgraph_path = metadata.get("langgraph_path", [])
-            if isinstance(langgraph_path, list) and "langgraph" in langgraph_path:
-                is_langgraph_context = True
-        else: # metadata is None
-            # If metadata is None, we might infer langgraph context if node_name_from_tags is present
-            if node_name_from_tags:
-                is_langgraph_context = True
-        # --- END: MODIFIED SECTION ---
+            if isinstance(langgraph_path, list) and langgraph_path: 
+                is_langgraph_node_execution = True 
 
-        if node_name_from_tags or is_langgraph_context: # MODIFIED: Use the new flag
+        if is_langgraph_node_execution:
              self.active_langgraph_node_name = effective_node_name 
-             logger.info(f"[{self.session_id}] on_chain_start: LANGGRAPH NODE START DETECTED. Node Name: '{self.active_langgraph_node_name}'. Self.is_final_eval_llm_active BEFORE check: {self.is_final_evaluator_llm_active}")
-             if self.active_langgraph_node_name == "overall_evaluator":
-                logger.info(f"[{self.session_id}] on_chain_start: OverallEvaluatorNode chain starting. Flag is_final_evaluator_llm_active should be set to TRUE by its LLM's on_chat_model_start shortly.")
-             else:
-                if self.is_final_evaluator_llm_active and self.active_langgraph_node_name != "overall_evaluator":
-                    logger.warning(f"[{self.session_id}] on_chain_start: Starting node '{self.active_langgraph_node_name}' but is_final_evaluator_llm_active was TRUE. Resetting to FALSE.")
-                    self.is_final_evaluator_llm_active = False
-
-        logger.debug(f"[{self.session_id}] on_chain_start: Chain/Node='{effective_node_name}', Inputs='{str(inputs)[:100]}...', Tags='{tags}', Metadata='{metadata}'")
+             logger.info(
+                 f"[{self.session_id}] on_chain_start: LANGGRAPH NODE START. "
+                 f"Node Name: '{self.active_langgraph_node_name}'. "
+                 f"Current is_final_eval_llm_active: {self.is_final_evaluator_llm_active}"
+             )
+             if self.is_final_evaluator_llm_active and self.active_langgraph_node_name != "overall_evaluator":
+                 logger.warning(
+                     f"[{self.session_id}] on_chain_start: Starting node '{self.active_langgraph_node_name}' "
+                     f"but is_final_evaluator_llm_active was TRUE. Resetting to FALSE."
+                 )
+                 self.is_final_evaluator_llm_active = False
+        
+        logger.debug(
+            f"[{self.session_id}] on_chain_start: Chain/Node='{effective_node_name}', "
+            f"Inputs='{str(inputs)[:100]}...', Tags='{tags}', Metadata='{metadata}'"
+        )
 
     async def on_chain_end(self, outputs: Dict[str, Any], *, run_id: UUID, parent_run_id: Optional[UUID] = None, **kwargs: Any) -> None:
-        logger.debug(f"[{self.session_id}] on_chain_end: For Node='{self.active_langgraph_node_name or 'UnknownChain'}', Outputs='{str(outputs)[:100]}...'")
+        chain_name_from_kwargs = kwargs.get('name', 'UnknownChainEnding') 
+        logger.debug(f"[{self.session_id}] on_chain_end: For Chain/Node='{chain_name_from_kwargs}', Outputs='{str(outputs)[:100]}...'")
         pass
 
     async def on_chain_error(self, error: Union[Exception, KeyboardInterrupt], **kwargs: Any) -> None: 
         log_prefix = self._get_log_prefix(); error_type_name = type(error).__name__
-        active_node = self.active_langgraph_node_name or "UnknownChain"
-        logger.error(f"[{self.session_id}] Chain Error (Node: {active_node}): {error}", exc_info=True)
-        error_content = f"[Chain Error] Node '{active_node}' failed: {error_type_name}: {error}"
+        chain_name_from_kwargs = kwargs.get('name', self.active_langgraph_node_name or "UnknownChain")
+        
+        logger.error(f"[{self.session_id}] Chain Error (Chain/Node: {chain_name_from_kwargs}): {error}", exc_info=True)
+        error_content = f"[Chain Error] Chain/Node '{chain_name_from_kwargs}' failed: {error_type_name}: {error}"
         await self.send_ws_message("monitor_log", f"{log_prefix} {error_content}")
-        await self.send_ws_message("status_message", f"Error occurred in agent processing node: {active_node}.")
-        await self.send_ws_message(AGENT_MESSAGE_TYPE_THINKING_UPDATE, {"status": f"Error in node: {active_node}."})
+        await self.send_ws_message("status_message", f"Error in agent processing at '{chain_name_from_kwargs}'.")
+        await self.send_ws_message(AGENT_MESSAGE_TYPE_THINKING_UPDATE, {"status": f"Error in: {chain_name_from_kwargs}."})
         await self._save_message(DB_MSG_TYPE_ERROR, error_content)
-        self.is_final_evaluator_llm_active = False 
-        # Don't reset active_langgraph_node_name here.
+        
+        if self.active_langgraph_node_name == "overall_evaluator" or chain_name_from_kwargs == "overall_evaluator":
+            self.is_final_evaluator_llm_active = False
+            logger.info(f"[{self.session_id}] on_chain_error: Reset is_final_evaluator_llm_active due to error in/related to overall_evaluator.")
 
     async def on_tool_start(self, serialized: Dict[str, Any], input_str: str, **kwargs: Any) -> None:
         self.current_tool_name = serialized.get("name", "Unknown Tool")

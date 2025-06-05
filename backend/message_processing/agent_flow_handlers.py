@@ -18,10 +18,10 @@ from langchain_core.tools import BaseTool
 from backend.config import settings
 from backend.llm_setup import get_llm
 from backend.tools import get_dynamic_tools, get_task_workspace_path
-from backend.planner import generate_plan, PlanStep
+from backend.planner import generate_plan # PlanStep no longer directly used here for instantiation
 from backend.callbacks import AgentCancelledException
-from backend.intent_classifier import classify_intent
-from backend.langgraph_agent import research_agent_graph, ResearchAgentState
+from backend.intent_classifier import classify_intent, IntentClassificationOutput # Import the class
+from backend.langgraph_agent import research_agent_graph, ResearchAgentState # research_agent_graph is the compiled app
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,6 @@ async def _update_plan_file_step_status(
     step_number: int,
     status_char: str
 ) -> None:
-    # ... (function content remains the same) ...
     if not plan_filename:
         logger.warning("Cannot update plan file: no active plan filename.")
         return
@@ -53,11 +52,13 @@ async def _update_plan_file_step_status(
 
         updated_lines = []
         found_step = False
+        # Regex to match: optional leading space, '-', optional space, '[', optional char, ']', optional space, number, '.', space, rest
         step_pattern = re.compile(rf"^\s*-\s*\[\s*[ x!-]?\s*\]\s*{re.escape(str(step_number))}\.\s+.*", re.IGNORECASE)
-        checkbox_pattern = re.compile(r"(\s*-\s*\[)\s*[ x!-]?\s*(\])")
+        checkbox_pattern = re.compile(r"(\s*-\s*\[)\s*[ x!-]?\s*(\])") # Capture groups around checkbox
 
         for line_no, line_content in enumerate(lines):
             if not found_step and step_pattern.match(line_content):
+                # Replace only the character inside the brackets
                 updated_line = checkbox_pattern.sub(rf"\g<1>{status_char}\g<2>", line_content, count=1)
                 updated_lines.append(updated_line)
                 found_step = True
@@ -82,13 +83,14 @@ async def process_user_message(
     session_id: str, data: Dict[str, Any], session_data_entry: Dict[str, Any],
     connected_clients_entry: Dict[str, Any], send_ws_message_func: SendWSMessageFunc,
     add_monitor_log_func: AddMonitorLogFunc, db_add_message_func: DBAddMessageFunc,
-    research_agent_lg_graph: Any
+    research_agent_lg_graph: Any # This is the compiled LangGraph app
 ) -> None:
     user_input_content = ""
     content_payload = data.get("content")
     if isinstance(content_payload, str):
         user_input_content = content_payload
     elif isinstance(content_payload, dict) and 'content' in content_payload and isinstance(content_payload['content'], str):
+        # Handles if UI sends { "type": "user_message", "content": { "content": "Actual message" } }
         user_input_content = content_payload['content']
     else:
         logger.warning(f"[{session_id}] Received non-string or unexpected content for user_message: {type(content_payload)}. Ignoring.")
@@ -100,8 +102,8 @@ async def process_user_message(
         await send_ws_message_func("status_message", "Please select or create a task first.")
         return
 
-    if (connected_clients_entry.get("agent_task") or
-        session_data_entry.get("plan_execution_active")):
+    if (connected_clients_entry.get("agent_task") or # Check if an asyncio.Task is already running
+        session_data_entry.get("plan_execution_active")): # Legacy flag, ensure consistency
         logger.warning(f"[{session_id}] User message received while agent/plan is already running for task {active_task_id}.")
         await send_ws_message_func("status_message", "Agent is busy. Please wait or stop the current process.")
         return
@@ -110,20 +112,44 @@ async def process_user_message(
     await add_monitor_log_func(f"User Input: {user_input_content}", "monitor_user_input")
 
     session_data_entry['original_user_query'] = user_input_content
-    session_data_entry['cancellation_requested'] = False
-    session_data_entry['active_plan_filename'] = None
+    session_data_entry['cancellation_requested'] = False # Reset cancellation flag
+    session_data_entry['active_plan_filename'] = None # Reset active plan filename
 
     await send_ws_message_func("agent_thinking_update", {"status": "Classifying intent..."})
 
-    dynamic_tools = get_dynamic_tools(active_task_id)
-    tools_summary_for_intent = "\n".join([f"- {tool.name}: {tool.description.split('.')[0]}" for tool in dynamic_tools])
+    # Get available tools for the current task to pass to intent classifier
+    try:
+        dynamic_tools = get_dynamic_tools(active_task_id)
+        tools_summary_for_intent = "\n".join(
+            [f"- {tool.name}: {tool.description.split('.')[0]}" for tool in dynamic_tools]
+        )
+        if not tools_summary_for_intent:
+             tools_summary_for_intent = "No tools seem to be available for this task."
+    except Exception as e:
+        logger.error(f"[{session_id}] Failed to load dynamic tools for intent classification: {e}", exc_info=True)
+        await send_ws_message_func("status_message", "Error: Could not load agent tools. Cannot proceed.")
+        await send_ws_message_func("agent_thinking_update", {"status": "Error."})
+        return
 
-    classified_intent_value = await classify_intent(user_input_content, session_data_entry, tools_summary_for_intent)
-    await add_monitor_log_func(f"Intent classified as: {classified_intent_value}", "system_intent_classified")
+    # Call the updated intent classifier
+    intent_classification_result: IntentClassificationOutput = await classify_intent(
+        user_input_content, 
+        session_data_entry, 
+        tools_summary_for_intent
+    )
+    
+    classified_intent_value = intent_classification_result.intent.upper()
+    identified_tool_name = intent_classification_result.identified_tool_name
+    extracted_tool_input = intent_classification_result.extracted_tool_input
 
-    # Prepare LLM ID overrides from session_data_entry to be passed into the graph's initial state
-    # These will be picked up by the intent_classifier_node (or other nodes as needed)
-    # to make decisions or select appropriate LLMs.
+    await add_monitor_log_func(
+        f"Intent classified as: {classified_intent_value}. "
+        f"Tool: {identified_tool_name or 'N/A'}. Input: {str(extracted_tool_input)[:50] if extracted_tool_input else 'N/A'}. "
+        f"Reason: {intent_classification_result.reasoning or 'N/A'}",
+        "system_intent_classified"
+    )
+
+    # Prepare initial state for the LangGraph
     initial_llm_ids_for_state = {
         "intent_classifier_llm_id": session_data_entry.get("session_intent_classifier_llm_id"),
         "planner_llm_id": session_data_entry.get("session_planner_llm_id"),
@@ -131,114 +157,112 @@ async def process_user_message(
         "executor_llm_id": f"{session_data_entry.get('selected_llm_provider', settings.executor_default_provider)}::{session_data_entry.get('selected_llm_model_name', settings.executor_default_model_name)}",
         "evaluator_llm_id": session_data_entry.get("session_evaluator_llm_id"),
     }
-    # Filter out None values as ResearchAgentState fields are Optional
     filtered_initial_llm_ids = {k: v for k,v in initial_llm_ids_for_state.items() if v is not None}
 
+    initial_graph_input_dict: ResearchAgentState = {
+        "user_query": user_input_content,
+        "classified_intent": classified_intent_value,
+        "identified_tool_name": identified_tool_name, # NEW
+        "extracted_tool_input": extracted_tool_input, # NEW
+        "current_task_id": active_task_id,
+        "chat_history": session_data_entry["memory"].chat_memory.messages, # Pass current chat history
+        # Initialize other fields that might be expected by the graph's entry point or subsequent nodes
+        "plan_steps": [], 
+        "current_step_index": 0,
+        "retry_count_for_current_step": 0,
+        "accumulated_plan_summary": "",
+        **filtered_initial_llm_ids # Pass LLM IDs into initial state
+    }
+
+    # --- Common Graph Invocation Setup ---
+    session_data_entry["callback_handler"].set_task_id(active_task_id)
+    
+    configurable_fields_for_run = {
+        "task_id": active_task_id,
+        "session_id": session_id,
+        **filtered_initial_llm_ids 
+    }
+    runnable_config = RunnableConfig(
+        callbacks=[session_data_entry["callback_handler"]],
+        configurable=configurable_fields_for_run
+    )
+    # --- End Common Graph Invocation Setup ---
 
     if classified_intent_value == "PLAN":
         await send_ws_message_func("agent_thinking_update", {"status": "Generating plan..."})
+        # For PLAN, we first generate the plan using the Planner LLM, then propose it.
+        # The actual graph execution for PLAN happens in `process_execute_confirmed_plan`.
         human_plan_summary, structured_plan_steps = await generate_plan(
             user_query=user_input_content,
-            session_data_entry=session_data_entry,
-            available_tools_summary=tools_summary_for_intent
+            # session_data_entry=session_data_entry, # For LLM selection
+            available_tools_summary=tools_summary_for_intent # Planner needs this
         )
+
         if human_plan_summary and structured_plan_steps:
             session_data_entry["current_plan_human_summary"] = human_plan_summary
-            session_data_entry["current_plan_structured"] = structured_plan_steps
-            # ... (rest of plan confirmation logic)
+            session_data_entry["current_plan_structured"] = structured_plan_steps # Store the Pydantic models
+            
+            # Convert PlanStep Pydantic models to dicts for sending via JSON to UI
+            plan_steps_for_ui = [step.dict() if isinstance(step, BaseModel) else step for step in structured_plan_steps]
+
             await send_ws_message_func("display_plan_for_confirmation", {
                 "human_summary": human_plan_summary,
-                "structured_plan": structured_plan_steps
+                "structured_plan": plan_steps_for_ui 
             })
             await add_monitor_log_func(f"Plan generated. Summary: {human_plan_summary}. Steps: {len(structured_plan_steps)}. Awaiting user confirmation.", "system_plan_generated")
             await send_ws_message_func("status_message", "Plan generated. Please review and confirm.")
             await send_ws_message_func("agent_thinking_update", {"status": "Awaiting plan confirmation..."})
         else:
-            # ... (plan generation failure logic) ...
             logger.error(f"[{session_id}] Failed to generate a plan for query: {user_input_content}")
             await add_monitor_log_func(f"Error: Failed to generate a plan.", "error_system")
             await send_ws_message_func("status_message", "Error: Could not generate a plan for your request.")
             await send_ws_message_func("agent_message", "I'm sorry, I couldn't create a plan for that request. Please try rephrasing or breaking it down.")
             await send_ws_message_func("agent_thinking_update", {"status": "Planning failed."})
-
-
-    elif classified_intent_value == "DIRECT_QA":
-        await send_ws_message_func("agent_thinking_update", {"status": "Processing directly (LangGraph)..."})
-        await add_monitor_log_func(f"Handling as DIRECT_QA with LangGraph.", "system_direct_qa")
-
-        initial_graph_input_dict = ResearchAgentState(
-            user_query=user_input_content,
-            classified_intent="DIRECT_QA",
-            current_task_id=active_task_id,
-            chat_history=session_data_entry["memory"].chat_memory.messages,
-            plan_steps=[],
-            current_step_index=0,
-            retry_count_for_current_step=0,
-            accumulated_plan_summary="",
-            **filtered_initial_llm_ids # Pass LLM IDs into initial state
-        )
-
-        session_data_entry["callback_handler"].set_task_id(active_task_id)
+    
+    elif classified_intent_value in ["DIRECT_QA", "DIRECT_TOOL_REQUEST"]:
+        # For DIRECT_QA and DIRECT_TOOL_REQUEST, we invoke the graph directly.
+        log_message = f"Handling as {classified_intent_value} with LangGraph."
+        if classified_intent_value == "DIRECT_TOOL_REQUEST":
+            log_message += f" Tool: {identified_tool_name}, Input: {str(extracted_tool_input)[:50]}..."
         
-        # Configurable fields for RunnableConfig should primarily be for runtime parameters
-        # that are not part of the primary state definition, or for overriding specific
-        # aspects of the graph if it's designed to accept them this way.
-        # LLM choices are now primarily driven by the state.
-        configurable_fields_for_run = {
-            "task_id": active_task_id, # Good to have for logging/context within graph execution
-            "session_id": session_id,   # Good to have for logging/context
-            # We can still pass LLM IDs here if some nodes are specifically designed
-            # to pick them from `config.configurable` instead of state.
-            # For consistency, if nodes use state for LLM IDs, then this might be redundant.
-            # Let's assume for now state is the primary source for nodes,
-            # and these are for broader config.
-            **filtered_initial_llm_ids # Also pass here, nodes can decide to use state or config
-        }
+        await send_ws_message_func("agent_thinking_update", {"status": f"Processing as {classified_intent_value.replace('_', ' ')}..."})
+        await add_monitor_log_func(log_message, f"system_{classified_intent_value.lower()}")
 
-        runnable_config = RunnableConfig(
-            callbacks=[session_data_entry["callback_handler"]],
-            configurable=configurable_fields_for_run # Pass the combined config
-        )
+        logger.info(f"[{session_id}] Invoking research_agent_graph.astream_events for {classified_intent_value}. Input State (partial): user_query='{user_input_content}'. Config: {runnable_config.get('configurable')}")
 
-        logger.info(f"[{session_id}] Invoking research_agent_graph.astream_events for DIRECT_QA. Input State (partial): user_query='{user_input_content}', classified_intent='DIRECT_QA'. Config: {runnable_config.get('configurable')}")
-
-
-        async def graph_streaming_task_direct_qa():
-            # REMOVED: final_answer_sent_from_direct_qa flag and manual send logic
-            # The WebSocketCallbackHandler should now pick up the AIMessage from OverallEvaluatorNode
+        async def graph_streaming_task():
             try:
                 async for event in research_agent_lg_graph.astream_events(
-                    initial_graph_input_dict,
+                    initial_graph_input_dict, # Use the prepared dictionary
                     config=runnable_config,
-                    version="v1"
+                    version="v1" # Or your desired version
                 ):
-                    event_node_name = event.get("name", "graph")
+                    event_node_name = event.get("name", "graph") # Default to "graph" if name isn't present
                     logger.debug(f"[{session_id}] Graph Event: {event['event']} for Node: {event_node_name}, Tags: {event.get('tags')}")
-                    # The callback handler is responsible for sending messages based on LLM events
-                    if event["event"] == "on_chain_end" and event_node_name == "ResearchAgentGraph": # Graph name
-                        logger.info(f"[{session_id}] LangGraph stream finished for DIRECT_QA.")
+                    # Callbacks handle UI updates based on LLM/tool events within the graph.
+                    if event["event"] == "on_chain_end" and event_node_name == "ResearchAgentGraph": # Check for the overall graph end
+                        logger.info(f"[{session_id}] LangGraph stream finished for {classified_intent_value}.")
             
             except AgentCancelledException:
-                # ... (cancellation logic remains the same) ...
-                logger.warning(f"[{session_id}] DIRECT_QA execution cancelled by user (LangGraph).")
-                await send_ws_message_func("status_message", "Direct QA cancelled.")
-                await add_monitor_log_func("Direct QA cancelled by user (LangGraph).", "system_cancel")
+                logger.warning(f"[{session_id}] {classified_intent_value} execution cancelled by user (LangGraph).")
+                await send_ws_message_func("status_message", f"{classified_intent_value.replace('_', ' ')} cancelled.")
+                await add_monitor_log_func(f"{classified_intent_value.replace('_', ' ')} cancelled by user (LangGraph).", "system_cancel")
             except Exception as e:
-                # ... (error handling remains the same) ...
-                logger.error(f"[{session_id}] Error during DIRECT_QA execution (LangGraph): {e}", exc_info=True)
-                await add_monitor_log_func(f"Error during Direct QA (LangGraph): {e}", "error_direct_qa")
-                await send_ws_message_func("agent_message", f"Sorry, I encountered an error trying to answer directly: {e}")
-                await send_ws_message_func("status_message", "Error during direct processing.")
+                logger.error(f"[{session_id}] Error during {classified_intent_value} execution (LangGraph): {e}", exc_info=True)
+                await add_monitor_log_func(f"Error during {classified_intent_value} (LangGraph): {e}", f"error_{classified_intent_value.lower()}")
+                await send_ws_message_func("agent_message", f"Sorry, I encountered an error trying to process your request: {e}")
+                await send_ws_message_func("status_message", f"Error during {classified_intent_value.replace('_', ' ')} processing.")
             finally:
                 connected_clients_entry["agent_task"] = None
+                session_data_entry["plan_execution_active"] = False # Ensure this is reset
                 await send_ws_message_func("agent_thinking_update", {"status": "Idle."})
 
-        current_graph_task = asyncio.create_task(graph_streaming_task_direct_qa())
+        current_graph_task = asyncio.create_task(graph_streaming_task())
         connected_clients_entry["agent_task"] = current_graph_task
     else: 
-        # ... (fallback logic remains the same) ...
-        logger.error(f"[{session_id}] Fallback: classify_intent returned '{classified_intent_value}', which is not 'PLAN' or 'DIRECT_QA'. Defaulting to planning.")
+        logger.error(f"[{session_id}] Fallback: classify_intent returned '{classified_intent_value}', which is not 'PLAN', 'DIRECT_QA', or 'DIRECT_TOOL_REQUEST'. This should not happen with new validation.")
         await add_monitor_log_func(f"Error: classify_intent returned unknown value '{classified_intent_value}'. Defaulting to PLAN.", "error_system")
+        # Fallback to PLAN logic (as before, for safety, though ideally the new validation in classify_intent prevents this)
         await send_ws_message_func("agent_thinking_update", {"status": "Generating plan (fallback)..."})
         human_plan_summary, structured_plan_steps = await generate_plan(
             user_query=user_input_content, 
@@ -246,15 +270,16 @@ async def process_user_message(
             available_tools_summary=tools_summary_for_intent
         )
         if human_plan_summary and structured_plan_steps:
+            # ... (same plan proposal logic as in "PLAN" block above) ...
             session_data_entry["current_plan_human_summary"] = human_plan_summary
             session_data_entry["current_plan_structured"] = structured_plan_steps
-            session_data_entry["current_plan_step_index"] = 0
-            session_data_entry["plan_execution_active"] = False
-            await send_ws_message_func("display_plan_for_confirmation", {"human_summary": human_plan_summary, "structured_plan": structured_plan_steps})
+            plan_steps_for_ui = [step.dict() if isinstance(step, BaseModel) else step for step in structured_plan_steps]
+            await send_ws_message_func("display_plan_for_confirmation", {"human_summary": human_plan_summary, "structured_plan": plan_steps_for_ui})
             await add_monitor_log_func(f"Plan generated (fallback). Summary: {human_plan_summary}. Steps: {len(structured_plan_steps)}. Awaiting user confirmation.", "system_plan_generated")
             await send_ws_message_func("status_message", "Plan generated. Please review and confirm.")
             await send_ws_message_func("agent_thinking_update", {"status": "Awaiting plan confirmation..."})
         else:
+            # ... (same plan failure logic) ...
             logger.error(f"[{session_id}] Failed to generate a plan (fallback) for query: {user_input_content}")
             await add_monitor_log_func(f"Error: Failed to generate a plan (fallback).", "error_system")
             await send_ws_message_func("status_message", "Error: Could not generate a plan for your request (fallback).")
@@ -270,43 +295,51 @@ async def process_execute_confirmed_plan(
     send_ws_message_func: SendWSMessageFunc,
     add_monitor_log_func: AddMonitorLogFunc,
     db_add_message_func: DBAddMessageFunc,
-    research_agent_lg_graph: Any
+    research_agent_lg_graph: Any # This is the compiled LangGraph app
 ) -> None:
-    # ... (function content remains the same - plan execution still pending LangGraph integration) ...
     logger.info(f"[{session_id}] Received 'execute_confirmed_plan'.")
     active_task_id = session_data_entry.get("current_task_id")
+    original_user_query_for_plan = session_data_entry.get('original_user_query') # Should have been set by process_user_message
+
     if not active_task_id:
         logger.warning(f"[{session_id}] 'execute_confirmed_plan' received but no active task.")
         await send_ws_message_func("status_message", "Error: No active task to execute plan for.")
         return
+    if not original_user_query_for_plan:
+        logger.error(f"[{session_id}] 'execute_confirmed_plan' but original_user_query is missing from session data.")
+        await send_ws_message_func("status_message", "Error: Original query context missing for plan execution.")
+        return
 
-    confirmed_plan_steps_dicts = data.get("confirmed_plan")
-    if not confirmed_plan_steps_dicts or not isinstance(confirmed_plan_steps_dicts, list):
+    confirmed_plan_steps_dicts_from_ui = data.get("confirmed_plan")
+    if not confirmed_plan_steps_dicts_from_ui or not isinstance(confirmed_plan_steps_dicts_from_ui, list):
         logger.error(f"[{session_id}] Invalid or missing plan in 'execute_confirmed_plan' message. Data received: {data}")
         await send_ws_message_func("status_message", "Error: Invalid plan received for execution.")
         return
 
-    session_data_entry["current_plan_structured"] = confirmed_plan_steps_dicts
-    session_data_entry["current_plan_step_index"] = 0
+    # Store the plan steps (as dicts, which is what the graph nodes will expect from state)
+    session_data_entry["current_plan_structured"] = confirmed_plan_steps_dicts_from_ui
+    session_data_entry["current_plan_step_index"] = 0 # Start with the first step
     session_data_entry["plan_execution_active"] = True
     session_data_entry['cancellation_requested'] = False
 
-    await add_monitor_log_func(f"User confirmed plan. Starting execution of {len(confirmed_plan_steps_dicts)} steps.", "system_plan_confirmed")
-    await send_ws_message_func("status_message", "Plan confirmed. Executing steps...")
+    await add_monitor_log_func(f"User confirmed plan. Starting execution of {len(confirmed_plan_steps_dicts_from_ui)} steps.", "system_plan_confirmed")
+    await send_ws_message_func("status_message", "Plan confirmed. Executing steps with LangGraph...")
+    await send_ws_message_func("agent_thinking_update", {"status": "Starting plan execution..."})
 
+
+    # Save the plan to a file (existing logic)
     timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     plan_filename = f"_plan_{timestamp_str}.md"
     session_data_entry['active_plan_filename'] = plan_filename
     plan_markdown_content = [f"# Agent Plan for Task: {active_task_id}\n", f"## Plan ID: {timestamp_str}\n"]
-    original_query_for_plan_file = session_data_entry.get('original_user_query', 'N/A')
-    plan_markdown_content.append(f"## Original User Query:\n{original_query_for_plan_file}\n")
+    plan_markdown_content.append(f"## Original User Query:\n{original_user_query_for_plan}\n")
     plan_markdown_content.append(f"## Plan Summary (from Planner):\n{session_data_entry.get('current_plan_human_summary', 'N/A')}\n")
     plan_markdown_content.append("## Steps:\n")
-    for i, step_data_dict in enumerate(confirmed_plan_steps_dicts):
-        desc = step_data_dict.get('description', 'N/A') if isinstance(step_data_dict, dict) else 'N/A (Invalid Step Format)'
-        tool_sugg = step_data_dict.get('tool_to_use', 'None') if isinstance(step_data_dict, dict) else 'N/A'
-        input_instr = step_data_dict.get('tool_input_instructions', 'None') if isinstance(step_data_dict, dict) else 'N/A'
-        expected_out = step_data_dict.get('expected_outcome', 'N/A') if isinstance(step_data_dict, dict) else 'N/A'
+    for i, step_data_dict in enumerate(confirmed_plan_steps_dicts_from_ui):
+        desc = step_data_dict.get('description', 'N/A')
+        tool_sugg = step_data_dict.get('tool_to_use', 'None')
+        input_instr = step_data_dict.get('tool_input_instructions', 'None')
+        expected_out = step_data_dict.get('expected_outcome', 'N/A')
         plan_markdown_content.append(f"- [ ] {i+1}. **{desc}**")
         plan_markdown_content.append(f"    - Tool Suggestion (Planner): `{tool_sugg}`")
         plan_markdown_content.append(f"    - Input Instructions (Planner): `{input_instr}`")
@@ -324,11 +357,75 @@ async def process_execute_confirmed_plan(
         logger.error(f"[{session_id}] Failed to save plan to file '{plan_filename}': {e}", exc_info=True)
         await add_monitor_log_func(f"Error saving plan to file '{plan_filename}': {e}", "error_system")
 
-    await add_monitor_log_func(f"LangGraph plan execution for {len(confirmed_plan_steps_dicts)} steps is PENDING IMPLEMENTATION in 'process_execute_confirmed_plan'.", "warning_system")
-    await send_ws_message_func("status_message", "Plan execution with LangGraph is under development.")
-    await send_ws_message_func("agent_message", "The plan has been acknowledged. Full execution using the new graph system is coming soon.")
-    await send_ws_message_func("agent_thinking_update", {"status": "Idle."})
-    session_data_entry["plan_execution_active"] = False
+    # --- Prepare initial state for LangGraph PLAN execution ---
+    initial_llm_ids_for_state = {
+        "intent_classifier_llm_id": session_data_entry.get("session_intent_classifier_llm_id"),
+        "planner_llm_id": session_data_entry.get("session_planner_llm_id"),
+        "controller_llm_id": session_data_entry.get("session_controller_llm_id"),
+        "executor_llm_id": f"{session_data_entry.get('selected_llm_provider', settings.executor_default_provider)}::{session_data_entry.get('selected_llm_model_name', settings.executor_default_model_name)}",
+        "evaluator_llm_id": session_data_entry.get("session_evaluator_llm_id"),
+    }
+    filtered_initial_llm_ids = {k: v for k,v in initial_llm_ids_for_state.items() if v is not None}
+
+    initial_graph_input_for_plan: ResearchAgentState = {
+        "user_query": original_user_query_for_plan,
+        "classified_intent": "PLAN", # Explicitly set for this flow
+        "plan_steps": confirmed_plan_steps_dicts_from_ui, # The actual plan steps
+        "current_task_id": active_task_id,
+        "chat_history": session_data_entry["memory"].chat_memory.messages,
+        "current_step_index": 0, # Start at the first step
+        "retry_count_for_current_step": 0,
+        "accumulated_plan_summary": f"Executing Plan for query: '{original_user_query_for_plan}'\n", # Initial summary
+        "is_direct_qa_flow": False, # This is a plan, not direct QA/Tool
+        **filtered_initial_llm_ids
+    }
+
+    session_data_entry["callback_handler"].set_task_id(active_task_id)
+    configurable_fields_for_run = {
+        "task_id": active_task_id,
+        "session_id": session_id,
+        **filtered_initial_llm_ids
+    }
+    runnable_config = RunnableConfig(
+        callbacks=[session_data_entry["callback_handler"]],
+        configurable=configurable_fields_for_run
+    )
+
+    logger.info(f"[{session_id}] Invoking research_agent_graph.astream_events for PLAN execution. Initial State (partial): Plan steps count = {len(confirmed_plan_steps_dicts_from_ui)}. Config: {runnable_config.get('configurable')}")
+
+    async def graph_streaming_task_plan():
+        try:
+            async for event in research_agent_lg_graph.astream_events(
+                initial_graph_input_for_plan,
+                config=runnable_config,
+                version="v1" 
+            ):
+                event_node_name = event.get("name", "graph")
+                logger.debug(f"[{session_id}] Plan Graph Event: {event['event']} for Node: {event_node_name}, Tags: {event.get('tags')}")
+                if event["event"] == "on_chain_end" and event_node_name == "ResearchAgentGraph":
+                    logger.info(f"[{session_id}] LangGraph stream finished for PLAN execution.")
+        
+        except AgentCancelledException:
+            logger.warning(f"[{session_id}] PLAN execution cancelled by user (LangGraph).")
+            await send_ws_message_func("status_message", "Plan execution cancelled.")
+            await add_monitor_log_func("Plan execution cancelled by user (LangGraph).", "system_cancel")
+            if session_data_entry.get('active_plan_filename'):
+                await _update_plan_file_step_status(task_workspace_path, session_data_entry['active_plan_filename'], session_data_entry.get('current_plan_step_index', 0) + 1, '!') # Mark current step as cancelled
+        except Exception as e:
+            logger.error(f"[{session_id}] Error during PLAN execution (LangGraph): {e}", exc_info=True)
+            await add_monitor_log_func(f"Error during PLAN execution (LangGraph): {e}", "error_plan_execution")
+            await send_ws_message_func("agent_message", f"Sorry, I encountered an error during plan execution: {e}")
+            await send_ws_message_func("status_message", "Error during plan execution.")
+            if session_data_entry.get('active_plan_filename'):
+                 await _update_plan_file_step_status(task_workspace_path, session_data_entry['active_plan_filename'], session_data_entry.get('current_plan_step_index', 0) + 1, 'x') # Mark current step as failed
+        finally:
+            connected_clients_entry["agent_task"] = None
+            session_data_entry["plan_execution_active"] = False
+            await send_ws_message_func("agent_thinking_update", {"status": "Idle."})
+            # Optionally: send a final 'plan_completed' or 'plan_failed' message to UI here
+
+    current_graph_task_plan = asyncio.create_task(graph_streaming_task_plan())
+    connected_clients_entry["agent_task"] = current_graph_task_plan
 
 
 async def process_cancel_plan_proposal(
@@ -336,14 +433,13 @@ async def process_cancel_plan_proposal(
     connected_clients_entry: Dict[str, Any], send_ws_message_func: SendWSMessageFunc,
     add_monitor_log_func: AddMonitorLogFunc
 ) -> None:
-    # ... (function content remains the same) ...
     logger.info(f"[{session_id}] Received 'cancel_plan_proposal'.")
-    plan_id_to_cancel = data.get("plan_id") 
+    plan_id_to_cancel = data.get("plan_id") # This might be from UI if UI tracks its own proposal IDs
 
     session_data_entry["current_plan_human_summary"] = None
     session_data_entry["current_plan_structured"] = None
-    session_data_entry["current_plan_step_index"] = -1
-    session_data_entry["plan_execution_active"] = False
+    session_data_entry["current_plan_step_index"] = -1 # Reset
+    session_data_entry["plan_execution_active"] = False # Ensure this is false
 
     await add_monitor_log_func(f"User cancelled plan proposal (ID: {plan_id_to_cancel or 'N/A'}).", "system_plan_cancelled")
     await send_ws_message_func("status_message", "Plan proposal cancelled by user.")
