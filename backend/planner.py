@@ -1,3 +1,4 @@
+# backend/planner.py
 import logging
 from typing import List, Dict, Any, Tuple, Optional
 
@@ -6,23 +7,33 @@ from backend.llm_setup import get_llm
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
-from langchain_core.pydantic_v1 import BaseModel, Field # Ensure Pydantic v1 for Langchain compatibility
+# MODIFIED: Import BaseModel and Field from Pydantic v2
+from pydantic import BaseModel, Field 
 import asyncio
 
 logger = logging.getLogger(__name__)
 
-# Define the structure for a single step in the plan
+# Define the structure for a single step in the plan using Pydantic v2
 class PlanStep(BaseModel):
     step_id: int = Field(description="A unique sequential identifier for this step, starting from 1.")
     description: str = Field(description="A concise, human-readable description of what this single sub-task aims to achieve.")
-    tool_to_use: Optional[str] = Field(description="The exact name of the tool to be used for this step, if any. Must be one of the available tools or 'None'.")
-    tool_input_instructions: Optional[str] = Field(description="Specific instructions or key parameters for the tool_input, if a tool is used. This is not the full tool input itself, but guidance for forming it.")
+    tool_to_use: Optional[str] = Field(default=None, description="The exact name of the tool to be used for this step, if any. Must be one of the available tools or 'None'.")
+    tool_input_instructions: Optional[str] = Field(default=None, description="Specific instructions or key parameters for the tool_input, if a tool is used. This is not the full tool input itself, but guidance for forming it.")
     expected_outcome: str = Field(description="What is the expected result or artifact from completing this step successfully? For generative 'No Tool' steps, this should describe the actual content to be produced (e.g., 'The text of a short poem about stars.'). For tool steps or steps producing data for subsequent steps, describe the state or data (e.g., 'File 'data.csv' downloaded.', 'The full text of 'report.txt' is available.').")
 
-# Define the structure for the overall plan
+    # For Pydantic v2, model_config is a class variable, not an inner class
+    model_config = {
+        "arbitrary_types_allowed": False # Or True if needed, but typically False for stricter models
+    }
+
+# Define the structure for the overall plan using Pydantic v2
 class AgentPlan(BaseModel):
     human_readable_summary: str = Field(description="A brief, conversational summary of the overall plan for the user.")
     steps: List[PlanStep] = Field(description="A list of detailed steps to accomplish the user's request.")
+
+    model_config = {
+        "arbitrary_types_allowed": False
+    }
 
 
 PLANNER_SYSTEM_PROMPT_TEMPLATE = """You are an expert planning assistant for a research agent.
@@ -63,22 +74,41 @@ Do not include any preamble or explanation outside of the JSON object."""
 
 async def generate_plan(
     user_query: str,
-    available_tools_summary: str
-) -> Tuple[Optional[str], Optional[List[Dict[str, Any]]]]:
+    available_tools_summary: str,
+    session_data_entry: Dict[str, Any] # Added to get LLM override for planner
+) -> Tuple[Optional[str], Optional[List[PlanStep]]]: # Return List of PlanStep models
     """
     Generates a multi-step plan based on the user query using an LLM.
-    Fetches its own LLM based on settings.
+    Fetches its own LLM based on settings and session overrides.
+    Returns a human-readable summary and a list of PlanStep Pydantic models.
     """
     logger.info(f"Planner: Generating plan for user query: {user_query[:100]}...")
 
+    # Determine Planner LLM
+    planner_llm_id_override = session_data_entry.get("session_planner_llm_id")
+    provider = settings.planner_provider
+    model_name = settings.planner_model_name
+
+    if planner_llm_id_override:
+        try:
+            override_provider, override_model_name = planner_llm_id_override.split("::", 1)
+            if override_provider and override_model_name:
+                provider = override_provider
+                model_name = override_model_name
+                logger.info(f"Planner: Using session override LLM: {provider}::{model_name}")
+            else:
+                logger.warning(f"Planner: Invalid session LLM ID format '{planner_llm_id_override}'. Using system default for Planner.")
+        except ValueError:
+            logger.warning(f"Planner: Could not parse session LLM ID '{planner_llm_id_override}'. Using system default for Planner.")
+    
     try:
         planner_llm: BaseChatModel = get_llm(
             settings,
-            provider=settings.planner_provider,
-            model_name=settings.planner_model_name,
+            provider=provider,
+            model_name=model_name,
             requested_for_role="Planner"
         ) 
-        logger.info(f"Planner: Using LLM {settings.planner_provider}::{settings.planner_model_name}")
+        logger.info(f"Planner: Using LLM {provider}::{model_name}")
     except Exception as e:
         logger.error(f"Planner: Failed to initialize LLM: {e}", exc_info=True)
         return None, None
@@ -95,19 +125,23 @@ async def generate_plan(
 
     try:
         logger.debug(f"Planner prompt input variables: {prompt_template.input_variables}")
-        planned_result_dict = await chain.ainvoke({
+        # The parser will return a dictionary if pydantic_object is used,
+        # or the Pydantic model instance directly if pydantic_model is used (newer LangChain versions)
+        # Let's assume it gives a dict and we construct AgentPlan from it.
+        planned_result_data = await chain.ainvoke({
             "user_query": user_query, 
             "available_tools_summary": available_tools_summary,
             "format_instructions": format_instructions
         })
 
         agent_plan: AgentPlan
-        if isinstance(planned_result_dict, AgentPlan):
-            agent_plan = planned_result_dict
-        elif isinstance(planned_result_dict, dict):
-            agent_plan = AgentPlan(**planned_result_dict)
+        if isinstance(planned_result_data, AgentPlan): # If parser directly gives the model
+            agent_plan = planned_result_data
+        elif isinstance(planned_result_data, dict): # If parser gives a dict
+            agent_plan = AgentPlan(**planned_result_data)
         else:
-            logger.error(f"Planner LLM call returned an unexpected type: {type(planned_result_dict)}. Content: {planned_result_dict}")
+            logger.error(f"Planner LLM call returned an unexpected type: {type(planned_result_data)}. Content: {planned_result_data}")
+            # Try to get raw output for debugging
             try:
                 raw_output_chain = prompt_template | planner_llm | StrOutputParser()
                 raw_output = await raw_output_chain.ainvoke({
@@ -121,22 +155,23 @@ async def generate_plan(
             return None, None
 
         human_summary = agent_plan.human_readable_summary
-        structured_steps = []
-        for i, step_model in enumerate(agent_plan.steps):
-            step_dict = step_model.dict()
-            step_dict['step_id'] = i + 1 
-            structured_steps.append(step_dict)
+        # The steps are already PlanStep instances due to Pydantic parsing in AgentPlan
+        structured_plan_steps_models: List[PlanStep] = agent_plan.steps
+        
+        # Ensure step_id is correctly set if not by LLM (though it should be)
+        for i, step_model in enumerate(structured_plan_steps_models):
+            if step_model.step_id != i + 1:
+                logger.warning(f"Planner: Correcting step_id for step '{step_model.description[:30]}...'. Original: {step_model.step_id}, New: {i+1}")
+                step_model.step_id = i + 1
 
 
         logger.info(f"Planner: Plan generated successfully. Summary: {human_summary}")
-        logger.debug(f"Planner: Structured plan: {structured_steps}")
+        logger.debug(f"Planner: Structured plan (model list): {[step.model_dump() for step in structured_plan_steps_models]}") # Use model_dump for Pydantic v2
         
-        # --- ADDED DEBUG LOGGING ---
         logger.info(f"Planner (DEBUG): Returning human_summary (type: {type(human_summary)}): '{str(human_summary)[:200]}...'")
-        logger.info(f"Planner (DEBUG): Returning structured_steps (type: {type(structured_steps)}, length: {len(structured_steps) if isinstance(structured_steps, list) else 'N/A'}): '{str(structured_steps)[:200]}...'")
-        # --- END ADDED DEBUG LOGGING ---
+        logger.info(f"Planner (DEBUG): Returning list of PlanStep models (length: {len(structured_plan_steps_models)}). First step desc: '{structured_plan_steps_models[0].description[:50] if structured_plan_steps_models else 'N/A'}'")
         
-        return human_summary, structured_steps
+        return human_summary, structured_plan_steps_models # Return list of PlanStep models
 
     except Exception as e:
         logger.error(f"Planner: Error during plan generation: {e}", exc_info=True)
@@ -156,30 +191,30 @@ if __name__ == '__main__':
     async def test_planner_poem_generation():
         query_poem = "Create a file called poem.txt and write in it a small poem about stars."
         tools_summary = "- write_file: To write files to workspace.\n- read_file: To read files from workspace."
+        mock_session_data = {"session_planner_llm_id": None} # Example
         
         print(f"\n--- Testing Planner with Poem Generation Query ---")
         print(f"Query: {query_poem}")
-        summary, plan = await generate_plan(query_poem, tools_summary)
+        summary, plan_models = await generate_plan(query_poem, tools_summary, mock_session_data)
 
-        if summary and plan:
+        if summary and plan_models:
             print("---- Human Readable Summary ----")
             print(summary)
-            print("\n---- Structured Plan ----")
-            for i, step_data in enumerate(plan):
-                if isinstance(step_data, dict):
-                    print(f"Step {step_data.get('step_id', i+1)}:")
-                    print(f"  Description: {step_data.get('description')}")
-                    print(f"  Tool: {step_data.get('tool_to_use')}")
-                    print(f"  Input Instructions: {step_data.get('tool_input_instructions')}")
-                    print(f"  Expected Outcome: {step_data.get('expected_outcome')}") 
-                else:
-                    print(f"Step {i+1}: Invalid step data format: {step_data}")
+            print("\n---- Structured Plan (from Pydantic Models) ----")
+            for step_model in plan_models:
+                # For Pydantic v2, use model_dump() instead of dict()
+                step_data = step_model.model_dump() 
+                print(f"Step {step_data.get('step_id')}:")
+                print(f"  Description: {step_data.get('description')}")
+                print(f"  Tool: {step_data.get('tool_to_use')}")
+                print(f"  Input Instructions: {step_data.get('tool_input_instructions')}")
+                print(f"  Expected Outcome: {step_data.get('expected_outcome')}") 
             
-            if len(plan) > 0 and "poem about stars" in plan[0].get("description", "").lower():
-                print(f"\nDEBUG: Expected outcome for poem generation step (Step 1): '{plan[0].get('expected_outcome')}'")
-                if "actual text" in plan[0].get('expected_outcome', '').lower() or \
-                   "generated poem" in plan[0].get('expected_outcome', '').lower() or \
-                   "the poem itself" in plan[0].get('expected_outcome', '').lower():
+            if len(plan_models) > 0 and "poem about stars" in plan_models[0].description.lower():
+                print(f"\nDEBUG: Expected outcome for poem generation step (Step 1): '{plan_models[0].expected_outcome}'")
+                if "actual text" in plan_models[0].expected_outcome.lower() or \
+                   "generated poem" in plan_models[0].expected_outcome.lower() or \
+                   "the poem itself" in plan_models[0].expected_outcome.lower():
                     print("DEBUG: Step 1 expected outcome seems correctly formulated for direct content generation.")
                 else:
                     print("DEBUG WARNING: Step 1 expected outcome might still be too indirect for direct content generation.")
@@ -187,3 +222,4 @@ if __name__ == '__main__':
             print("Failed to generate a plan for poem generation query.")
 
     asyncio.run(test_planner_poem_generation())
+
