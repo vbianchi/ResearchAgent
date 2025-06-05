@@ -141,9 +141,6 @@ class WebSocketCallbackHandler(AsyncCallbackHandler):
         else:
             logger.error(f"[{self.session_id}] Cannot check cancellation flag: Session data not found for session in shared dict.")
         
-        # Critical debug log for post-yield check (simulating a brief pause for context switch)
-        # In a real async scenario, this check might happen after an `await` point.
-        # Since this is a synchronous check method, we log its state if it were to yield.
         logger.critical(f"CRITICAL_DEBUG_CANCEL_CHECK: [{self.session_id}] _check_cancellation for '{step_name}' (Post-Yield Check): cancellation_requested flag is currently {self.session_data.get(self.session_id, {}).get('cancellation_requested', False)}")
 
 
@@ -180,7 +177,6 @@ class WebSocketCallbackHandler(AsyncCallbackHandler):
         self, serialized: Dict[str, Any], messages: List[List[BaseMessage]], *, run_id: UUID, parent_run_id: Optional[UUID] = None, tags: Optional[List[str]] = None, metadata: Optional[Dict[str, Any]] = None, **kwargs: Any
     ) -> Any:
         try:
-            # --- START: MODIFIED SECTION (Added logging) ---
             self._check_cancellation("Chat Model execution")
             
             self.active_langgraph_node_name = None 
@@ -208,9 +204,7 @@ class WebSocketCallbackHandler(AsyncCallbackHandler):
                 f"Node: '{self.active_langgraph_node_name}', "
                 f"is_final_evaluator_llm_active: {self.is_final_evaluator_llm_active}"
             )
-            # --- END: MODIFIED SECTION (Added logging) ---
             
-            # Critical debug log to see metadata
             role_hint_from_meta = metadata.get("role_hint", "LLM_CORE") if metadata else "LLM_CORE"
             logger.critical(f"CRITICAL_DEBUG: [{self.session_id}] on_chat_model_start: ENTERED for role_hint: {role_hint_from_meta}. Metadata: {metadata}")
 
@@ -224,16 +218,13 @@ class WebSocketCallbackHandler(AsyncCallbackHandler):
         pass
 
     async def on_llm_end(self, response: LLMResult, *, run_id: UUID, parent_run_id: Optional[UUID] = None, **kwargs: Any) -> None:
-        role_hint_from_meta = kwargs.get("metadata", {}).get("role_hint", "LLM_CORE") # Get role hint from kwargs metadata
-        # --- START: MODIFIED SECTION (Added logging) ---
+        role_hint_from_meta = kwargs.get("metadata", {}).get("role_hint", "LLM_CORE") 
         logger.info(
             f"[{self.session_id}] on_llm_end: Entered. "
             f"Current active_langgraph_node_name (from self): '{self.active_langgraph_node_name}', "
             f"Current is_final_evaluator_llm_active (from self): {self.is_final_evaluator_llm_active}"
         )
-        # Critical debug log for role hint
         logger.critical(f"CRITICAL_DEBUG: [{self.session_id}] on_llm_end: ENTERED for role_hint: {role_hint_from_meta}")
-        # --- END: MODIFIED SECTION (Added logging) ---
 
         log_prefix = self._get_log_prefix()
         logger.debug(f"[{self.session_id}] on_llm_end (Role: {role_hint_from_meta}): Full response object type: {type(response)}") 
@@ -242,7 +233,6 @@ class WebSocketCallbackHandler(AsyncCallbackHandler):
         model_name: str = "unknown_model"; source_for_tokens = "unknown"
 
         try:
-            # ... (existing token parsing logic - unchanged) ...
             if response.llm_output and isinstance(response.llm_output, dict):
                 logger.debug(f"[{self.session_id}] on_llm_end (Role: {role_hint_from_meta}): response.llm_output IS DICT: {response.llm_output}")
                 llm_output_data = response.llm_output
@@ -291,7 +281,7 @@ class WebSocketCallbackHandler(AsyncCallbackHandler):
                             if hasattr(first_gen.message, 'response_metadata') and isinstance(first_gen.message.response_metadata, dict):
                                 model_name_candidate = first_gen.message.response_metadata.get('model_name', model_name) 
                                 if model_name_candidate and model_name_candidate != "unknown_model": model_name = model_name_candidate
-                            if (not model_name or model_name == "unknown_model") and first_gen.generation_info and isinstance(first_gen.generation_info, dict): # Fallback to generation_info for model_name
+                            if (not model_name or model_name == "unknown_model") and first_gen.generation_info and isinstance(first_gen.generation_info, dict): 
                                 model_name_candidate = first_gen.generation_info.get('model_name', first_gen.generation_info.get('model', model_name))
                                 if model_name_candidate and model_name_candidate != "unknown_model": model_name = model_name_candidate
 
@@ -341,9 +331,8 @@ class WebSocketCallbackHandler(AsyncCallbackHandler):
         except Exception as e:
             logger.error(f"[{self.session_id}] Error processing token usage in on_llm_end (Role: {role_hint_from_meta}): {e}", exc_info=True)
 
-        # --- Send final agent message if this LLM call was from OverallEvaluatorNode ---
         if self.is_final_evaluator_llm_active:
-            logger.info(f"[{self.session_id}] on_llm_end: Condition `if self.is_final_evaluator_llm_active` is TRUE. Proceeding to send agent_message.") # ADDED
+            logger.info(f"[{self.session_id}] on_llm_end: Condition `if self.is_final_evaluator_llm_active` is TRUE. Proceeding to send agent_message.") 
             final_answer_content = "No final output from OverallEvaluator's LLM."
             if response.generations and response.generations[0]:
                 first_generation = response.generations[0][0]
@@ -389,14 +378,26 @@ class WebSocketCallbackHandler(AsyncCallbackHandler):
                     break
         
         effective_node_name = node_name_from_tags or chain_name 
-        # CRITICAL: Only update self.active_langgraph_node_name if it's a langgraph node run
-        if node_name_from_tags or "langgraph" in (metadata.get("langgraph_path", []) if metadata else []):
+        
+        # --- START: MODIFIED SECTION ---
+        # Check if metadata is None before trying to access its attributes
+        is_langgraph_context = False
+        if metadata is not None: # Check if metadata is not None
+            langgraph_path = metadata.get("langgraph_path", [])
+            if isinstance(langgraph_path, list) and "langgraph" in langgraph_path:
+                is_langgraph_context = True
+        else: # metadata is None
+            # If metadata is None, we might infer langgraph context if node_name_from_tags is present
+            if node_name_from_tags:
+                is_langgraph_context = True
+        # --- END: MODIFIED SECTION ---
+
+        if node_name_from_tags or is_langgraph_context: # MODIFIED: Use the new flag
              self.active_langgraph_node_name = effective_node_name 
              logger.info(f"[{self.session_id}] on_chain_start: LANGGRAPH NODE START DETECTED. Node Name: '{self.active_langgraph_node_name}'. Self.is_final_eval_llm_active BEFORE check: {self.is_final_evaluator_llm_active}")
              if self.active_langgraph_node_name == "overall_evaluator":
                 logger.info(f"[{self.session_id}] on_chain_start: OverallEvaluatorNode chain starting. Flag is_final_evaluator_llm_active should be set to TRUE by its LLM's on_chat_model_start shortly.")
              else:
-                # Reset the flag if another node starts, to prevent stale state from a previous overall_evaluator run in the same session (if that's possible)
                 if self.is_final_evaluator_llm_active and self.active_langgraph_node_name != "overall_evaluator":
                     logger.warning(f"[{self.session_id}] on_chain_start: Starting node '{self.active_langgraph_node_name}' but is_final_evaluator_llm_active was TRUE. Resetting to FALSE.")
                     self.is_final_evaluator_llm_active = False
@@ -405,8 +406,6 @@ class WebSocketCallbackHandler(AsyncCallbackHandler):
 
     async def on_chain_end(self, outputs: Dict[str, Any], *, run_id: UUID, parent_run_id: Optional[UUID] = None, **kwargs: Any) -> None:
         logger.debug(f"[{self.session_id}] on_chain_end: For Node='{self.active_langgraph_node_name or 'UnknownChain'}', Outputs='{str(outputs)[:100]}...'")
-        # Don't reset active_langgraph_node_name here, as on_llm_end relies on it.
-        # It will be reset in on_llm_end if it was the final evaluator's LLM, or by the next on_chain_start/on_llm_start.
         pass
 
     async def on_chain_error(self, error: Union[Exception, KeyboardInterrupt], **kwargs: Any) -> None: 
@@ -418,11 +417,8 @@ class WebSocketCallbackHandler(AsyncCallbackHandler):
         await self.send_ws_message("status_message", f"Error occurred in agent processing node: {active_node}.")
         await self.send_ws_message(AGENT_MESSAGE_TYPE_THINKING_UPDATE, {"status": f"Error in node: {active_node}."})
         await self._save_message(DB_MSG_TYPE_ERROR, error_content)
-        # If a chain errors out, it's unlikely it was the final evaluator LLM, but reset defensively
         self.is_final_evaluator_llm_active = False 
-        # Don't reset active_langgraph_node_name here to ensure errors are logged with context.
-        # It will be overwritten by the next node start or cleared if the graph ends.
-
+        # Don't reset active_langgraph_node_name here.
 
     async def on_tool_start(self, serialized: Dict[str, Any], input_str: str, **kwargs: Any) -> None:
         self.current_tool_name = serialized.get("name", "Unknown Tool")
@@ -514,8 +510,6 @@ class WebSocketCallbackHandler(AsyncCallbackHandler):
         log_prefix = self._get_log_prefix()
         logger.info(f"[{self.session_id}] on_agent_finish (ReAct style). Log: {finish.log}")
         self.current_tool_name = None 
-        # Defensively reset these flags. If this on_agent_finish is from a sub-agent within a LangGraph node,
-        # the main graph's on_llm_end/on_chain_start will manage the flags for the graph's context.
         self.is_final_evaluator_llm_active = False 
         self.active_langgraph_node_name = None 
 
