@@ -1,111 +1,113 @@
 # backend/langgraph_agent.py
 import logging
-from typing import TypedDict, Optional, List, Dict, Any
-import asyncio 
+from typing import TypedDict, Optional, List, Annotated, Dict, Any
 
-from langchain_core.pydantic_v1 import BaseModel, Field 
-from langchain_core.messages import BaseMessage, AIMessage, HumanMessage 
+import asyncio # For the __main__ test block
+
+from langchain_core.pydantic_v1 import BaseModel, Field
+from langchain_core.messages import BaseMessage, AIMessage, HumanMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph, END
 
 from backend.config import settings
 from backend.llm_setup import get_llm
-from backend.tools import get_dynamic_tools, ToolLoadingError 
+from backend.tools import get_dynamic_tools
+from backend.planner import generate_plan # <<< Import generate_plan
 
 logger = logging.getLogger(__name__)
 
 # --- Define State ---
-class ResearchAgentState(TypedDict, total=False):
+class ResearchAgentState(TypedDict, total=False): # [cite: 535]
     user_query: str
     classified_intent: Optional[str]
-    identified_tool_name: Optional[str]
-    extracted_tool_input: Optional[str]
+    plan_steps: Optional[List[Dict[str, Any]]] # [cite: 498]
+    current_step_index: int # [cite: 535]
+    current_task_id: Optional[str] # [cite: 498]
+    chat_history: Optional[List[BaseMessage]]
     
-    plan_steps: Optional[List[Dict[str, Any]]] 
-    current_step_index: int 
-    current_task_id: Optional[str] 
-    chat_history: Optional[List[BaseMessage]] 
+    controller_output_tool_name: Optional[str]
+    controller_output_tool_input: Optional[str]
+    executor_output: Optional[str]
+    previous_step_executor_output: Optional[str] # [cite: 498]
     
-    controller_output_tool_name: Optional[str] 
-    controller_output_tool_input: Optional[str] 
-    executor_output: Optional[str] 
-    previous_step_executor_output: Optional[str] 
+    step_evaluator_output: Optional[Dict[str, Any]]
+    overall_evaluator_output: Optional[Dict[str, Any]]
     
-    step_evaluator_output: Optional[Dict[str, Any]] 
-    overall_evaluator_output: Optional[Dict[str, Any]] 
+    retry_count_for_current_step: int # [cite: 500]
+    accumulated_plan_summary: str # [cite: 535]
     
-    retry_count_for_current_step: int 
-    accumulated_plan_summary: str 
-    
-    intent_classifier_llm_id: Optional[str]
-    planner_llm_id: Optional[str]
-    controller_llm_id: Optional[str]
-    executor_llm_id: Optional[str] 
-    evaluator_llm_id: Optional[str] 
+    # LLM configuration to be used by nodes, passed from initial state or config
+    intent_classifier_llm_id: Optional[str] # [cite: 536]
+    planner_llm_id: Optional[str] # [cite: 536]
+    controller_llm_id: Optional[str] # [cite: 536]
+    executor_llm_id: Optional[str] # [cite: 536]
+    evaluator_llm_id: Optional[str] # [cite: 536]
 
-    is_direct_qa_flow: bool 
-    direct_tool_request_error: Optional[str] 
+    is_direct_qa_flow: bool # [cite: 535]
 
+    # Fields for PlannerNode output
+    plan_summary: Optional[str] # [cite: 498]
+    plan_generation_error: Optional[str] # For PlannerNode errors
 
 # --- Node Implementations ---
 
 async def intent_classifier_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    logger.info(">>> NODE: Intent Classifier (Graph Node)")
-    configurable_settings = config.get("configurable", {})
-    
-    intent = state.get("classified_intent", "DIRECT_QA") 
-    is_direct_flow_flag = intent in ["DIRECT_QA", "DIRECT_TOOL_REQUEST"]
-    
-    update_dict = {
-        "classified_intent": intent,
-        "identified_tool_name": state.get("identified_tool_name"), 
-        "extracted_tool_input": state.get("extracted_tool_input"), 
-        "current_step_index": 0, 
-        "retry_count_for_current_step": 0, 
-        "is_direct_qa_flow": is_direct_flow_flag, 
-        "intent_classifier_llm_id": configurable_settings.get("intent_classifier_llm_id", state.get("intent_classifier_llm_id")),
-        "planner_llm_id": configurable_settings.get("planner_llm_id", state.get("planner_llm_id")),
-        "controller_llm_id": configurable_settings.get("controller_llm_id", state.get("controller_llm_id")),
-        "executor_llm_id": configurable_settings.get("executor_llm_id", state.get("executor_llm_id")),
-        "evaluator_llm_id": configurable_settings.get("evaluator_llm_id", state.get("evaluator_llm_id")),
-    }
-    logger.info(f"Intent Classifier Node: Outputting state update: { {k: (str(v)[:50] + '...' if isinstance(v, str) and len(v) > 50 else v) for k, v in update_dict.items()} }")
-    return update_dict
+    logger.info(">>> NODE: Intent Classifier") # [cite: 537]
+    configurable_settings = config.get("configurable", {}) # [cite: 541]
 
+    # Extract session-specific LLM overrides passed in initial graph state or config
+    session_intent_llm_id = state.get("intent_classifier_llm_id") or configurable_settings.get("intent_classifier_llm_id")
+    session_planner_llm_id = state.get("planner_llm_id") or configurable_settings.get("planner_llm_id")
+    session_controller_llm_id = state.get("controller_llm_id") or configurable_settings.get("controller_llm_id")
+    session_executor_llm_id = state.get("executor_llm_id") or configurable_settings.get("executor_llm_id")
+    session_evaluator_llm_id = state.get("evaluator_llm_id") or configurable_settings.get("evaluator_llm_id")
+    
+    # The actual classification is assumed to have happened before this node (e.g., in agent_flow_handlers)
+    # and `classified_intent` is passed in the initial state.
+    # This node primarily ensures LLM IDs are set for subsequent nodes.
+    return {
+        "classified_intent": state.get("classified_intent", "DIRECT_QA"),
+        "current_step_index": 0,
+        "retry_count_for_current_step": 0,
+        "is_direct_qa_flow": state.get("classified_intent") == "DIRECT_QA",
+        "intent_classifier_llm_id": session_intent_llm_id, # [cite: 542]
+        "planner_llm_id": session_planner_llm_id, # [cite: 542]
+        "controller_llm_id": session_controller_llm_id, # [cite: 542]
+        "executor_llm_id": session_executor_llm_id, # [cite: 542]
+        "evaluator_llm_id": session_evaluator_llm_id, # [cite: 542]
+    }
 
 async def direct_qa_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    logger.info(">>> NODE: Direct QA (LLM Only)")
+    logger.info(">>> NODE: Direct QA")
     user_query = state.get("user_query", "No query provided.")
-    chat_history_messages = state.get("chat_history", [])
+    chat_history = state.get("chat_history", [])
     
-    llm_id_str = state.get("executor_llm_id") 
-    provider = settings.executor_default_provider 
-    model_name = settings.executor_default_model_name 
-
-    if llm_id_str:
+    llm_id_str = state.get("executor_llm_id") # [cite: 543]
+    if not llm_id_str:
+        logger.warning("DirectQANode: executor_llm_id not found in state. Using system default executor LLM.") # [cite: 544]
+        provider = settings.executor_default_provider
+        model_name = settings.executor_default_model_name
+    else:
         try:
             provider, model_name = llm_id_str.split("::", 1)
         except ValueError:
-            logger.warning(f"DirectQANode: Invalid LLM ID format '{llm_id_str}'. Using system default.")
-    else:
-        logger.warning("DirectQANode: executor_llm_id not found in state. Using system default.")
-
+            logger.warning(f"DirectQANode: Invalid LLM ID format '{llm_id_str}'. Using system default executor LLM.")
+            provider = settings.executor_default_provider # [cite: 545]
+            model_name = settings.executor_default_model_name
+    
     logger.info(f"DirectQANode: Using LLM {provider}::{model_name}")
     
     try:
-        llm = get_llm(settings, provider=provider, model_name=model_name, requested_for_role="DirectQA_Node")
+        # Pass callbacks from config to get_llm
+        llm = get_llm(settings, provider=provider, model_name=model_name, 
+                      callbacks=config.get("callbacks"), 
+                      requested_for_role="DirectQA_Node")
     except Exception as e:
         logger.error(f"DirectQANode: Failed to initialize LLM: {e}")
-        return {"executor_output": f"Error: Could not initialize LLM for Direct QA. {e}", "is_direct_qa_flow": True}
+        return {"executor_output": f"Error: Could not initialize LLM for Direct QA. {e}", "is_direct_qa_flow": True} # [cite: 546]
 
-    history_str_parts = []
-    for msg in chat_history_messages:
-        if isinstance(msg, HumanMessage):
-            history_str_parts.append(f"Human: {msg.content}")
-        elif isinstance(msg, AIMessage):
-            history_str_parts.append(f"AI: {msg.content}")
-    history_str = "\n".join(history_str_parts)
+    history_str = "\n".join([f"{msg.type}: {msg.content}" for msg in chat_history])
     
     prompt_template = ChatPromptTemplate.from_messages([
         ("system", "You are a helpful AI assistant. Answer the user's query directly and concisely. Consider the chat history for context if relevant."),
@@ -114,9 +116,9 @@ async def direct_qa_node(state: ResearchAgentState, config: RunnableConfig) -> D
     
     chain = prompt_template | llm
     
-    logger.info(f"DirectQANode: Invoking LLM for query: '{user_query}' with history.")
+    logger.info(f"DirectQANode: Invoking LLM for query: '{user_query}'")
     try:
-        response = await chain.ainvoke({"user_query": user_query, "chat_history": history_str}, config=config) 
+        response = await chain.ainvoke({"user_query": user_query, "chat_history": history_str}, config=config) # [cite: 548]
         answer_text = response.content if hasattr(response, 'content') else str(response)
         logger.info(f"DirectQANode: LLM produced answer (raw): {answer_text[:200]}...")
         return {"executor_output": answer_text, "is_direct_qa_flow": True}
@@ -124,54 +126,107 @@ async def direct_qa_node(state: ResearchAgentState, config: RunnableConfig) -> D
         logger.error(f"DirectQANode: Error during LLM invocation: {e}", exc_info=True)
         return {"executor_output": f"Error processing Direct QA: {e}", "is_direct_qa_flow": True}
 
+# <<< START NEW PlannerNode IMPLEMENTATION >>>
+async def planner_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
+    logger.info(">>> NODE: Planner")
+    user_query = state.get("user_query")
+    current_task_id = state.get("current_task_id")
+    planner_llm_id_str = state.get("planner_llm_id") # Get LLM ID from state
 
-async def direct_tool_executor_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    logger.info(">>> NODE: Direct Tool Executor")
-    task_id = state.get("current_task_id")
-    tool_name = state.get("identified_tool_name")
-    tool_input_str = state.get("extracted_tool_input")
+    if not user_query:
+        logger.error("PlannerNode: User query is missing from state.")
+        return {"plan_steps": None, "plan_summary": None, "plan_generation_error": "User query is missing."}
 
-    if not task_id:
-        logger.error("DirectToolExecutorNode: Missing task_id in state. Cannot load tools.")
-        return {"executor_output": "Error: Task context missing for tool execution.", "is_direct_qa_flow": True, "direct_tool_request_error": "Task ID missing."}
-    if not tool_name:
-        logger.error("DirectToolExecutorNode: Missing identified_tool_name in state.")
-        return {"executor_output": "Error: Tool name not identified for execution.", "is_direct_qa_flow": True, "direct_tool_request_error": "Tool name missing."}
-
-    logger.info(f"DirectToolExecutorNode: Attempting to execute tool '{tool_name}' with input '{str(tool_input_str)[:100]}...' for task '{task_id}'.")
-
-    try:
-        available_tools = get_dynamic_tools(current_task_id=task_id)
-        logger.debug(f"DirectToolExecutorNode: Loaded {len(available_tools)} tools for task '{task_id}'.")
-    except ToolLoadingError as e:
-        logger.error(f"DirectToolExecutorNode: Failed to load tools for task '{task_id}': {e}", exc_info=True)
-        return {"executor_output": f"Error: Could not load tools for task. {e}", "is_direct_qa_flow": True, "direct_tool_request_error": f"Tool loading failed: {e}"}
-
-    selected_tool = next((t for t in available_tools if t.name == tool_name), None)
-    
-    if not selected_tool:
-        logger.error(f"DirectToolExecutorNode: Tool '{tool_name}' not found in available tools for task '{task_id}'.")
-        tool_names = [t.name for t in available_tools]
-        return {"executor_output": f"Error: Tool '{tool_name}' is not available. Available tools: {tool_names}", "is_direct_qa_flow": True, "direct_tool_request_error": f"Tool '{tool_name}' not found."}
+    # Determine Planner LLM
+    provider = settings.planner_provider
+    model_name = settings.planner_model_name
+    if planner_llm_id_str:
+        try:
+            parsed_provider, parsed_model_name = planner_llm_id_str.split("::", 1)
+            provider = parsed_provider
+            model_name = parsed_model_name
+            logger.info(f"PlannerNode: Using LLM ID from state: {planner_llm_id_str}")
+        except ValueError:
+            logger.warning(f"PlannerNode: Invalid planner_llm_id format '{planner_llm_id_str}'. Falling back to system default for Planner.")
+    else:
+        logger.info(f"PlannerNode: planner_llm_id not found in state. Using system default for Planner: {provider}::{model_name}")
 
     try:
-        logger.info(f"DirectToolExecutorNode: Executing tool '{selected_tool.name}' with input: {tool_input_str}")
-        tool_result = await selected_tool.arun(tool_input_str, config=config) 
-        logger.info(f"DirectToolExecutorNode: Tool '{tool_name}' executed. Output length: {len(str(tool_result))}. Output snippet: {str(tool_result)[:200]}...")
-        return {"executor_output": str(tool_result), "is_direct_qa_flow": True}
+        # Pass callbacks from config to get_llm
+        planner_llm_instance = get_llm(
+            settings,
+            provider=provider,
+            model_name=model_name,
+            callbacks=config.get("callbacks"), # Pass callbacks from graph's config
+            requested_for_role="PlannerNode_LLM"
+        )
     except Exception as e:
-        logger.error(f"DirectToolExecutorNode: Error executing tool '{tool_name}': {e}", exc_info=True)
-        return {"executor_output": f"Error during execution of tool '{tool_name}': {e}", "is_direct_qa_flow": True, "direct_tool_request_error": f"Tool execution error: {e}"}
+        logger.error(f"PlannerNode: Failed to initialize Planner LLM ({provider}::{model_name}): {e}", exc_info=True)
+        return {
+            "plan_steps": None, "plan_summary": None, 
+            "plan_generation_error": f"Failed to initialize Planner LLM: {e}",
+            "current_step_index": 0, "retry_count_for_current_step": 0, 
+            "accumulated_plan_summary": "Error: Planning LLM failed to initialize.",
+            "is_direct_qa_flow": False
+        }
 
+    # Get available tools summary
+    available_tools = get_dynamic_tools(current_task_id=current_task_id)
+    available_tools_summary = "\n".join(
+        [f"- {tool.name}: {tool.description.split('.')[0]}" for tool in available_tools]
+    )
+    if not available_tools_summary:
+        available_tools_summary = "No tools are currently available."
+        logger.warning("PlannerNode: No tools available for planning.")
+    
+    # Get session_data_entry for generate_plan (though it's not directly used in the modified generate_plan for LLM selection)
+    # However, generate_plan might evolve to use other parts of session_data_entry.
+    # For now, we pass an empty dict if not available in state, or we assume it's part of `config.configurable`
+    session_data_for_planner = {"session_planner_llm_id": planner_llm_id_str} # Minimal info it might use for logging its decision
 
-async def placeholder_planner_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    logger.info(">>> NODE: Planner (Placeholder)")
-    plan = [{"step_id": 1, "description": "Placeholder: Do step 1", "tool_to_use": "some_tool", "expected_outcome": "Step 1 done"}]
-    logger.info(f"Plan generated: {plan}")
-    return {"plan_steps": plan, "current_step_index": 0, "retry_count_for_current_step": 0, "accumulated_plan_summary": "Plan:\n1. Do step 1\n", "is_direct_qa_flow": False}
+    human_summary, structured_steps = await generate_plan(
+        user_query=user_query,
+        available_tools_summary=available_tools_summary,
+        session_data_entry=session_data_for_planner, # Pass session data (might be used if generate_plan evolves)
+        llm_instance=planner_llm_instance      # Pass the specific LLM instance
+    )
+
+    if human_summary and structured_steps:
+        logger.info(f"PlannerNode: Plan generated successfully. Summary: {human_summary[:100]}...")
+        initial_accumulated_summary = (
+            f"Original Query: {user_query}\n"
+            f"Overall Plan Summary: {human_summary}\n"
+            f"--- Plan Steps ---\n"
+        )
+        for i, step in enumerate(structured_steps):
+            initial_accumulated_summary += f"{i+1}. {step.get('description', 'N/A')}\n"
+        
+        return {
+            "plan_steps": structured_steps,
+            "plan_summary": human_summary,
+            "plan_generation_error": None,
+            "current_step_index": 0, # Start at the first step
+            "retry_count_for_current_step": 0,
+            "accumulated_plan_summary": initial_accumulated_summary,
+            "is_direct_qa_flow": False
+        }
+    else:
+        logger.error(f"PlannerNode: Failed to generate plan for query: {user_query}")
+        error_msg = "Failed to generate a plan."
+        # Check if planner_llm_instance itself was the issue from a previous log, though usually an exception
+        return {
+            "plan_steps": None,
+            "plan_summary": None,
+            "plan_generation_error": error_msg,
+            "current_step_index": 0, # Or handle error state appropriately
+            "retry_count_for_current_step": 0,
+            "accumulated_plan_summary": f"Error: Planning failed. Query: {user_query}",
+            "is_direct_qa_flow": False # Still part of a plan flow, even if it failed at planning
+        }
+# <<< END NEW PlannerNode IMPLEMENTATION >>>
 
 async def placeholder_controller_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    logger.info(">>> NODE: Controller (Placeholder)")
+    logger.info(">>> NODE: Controller (Placeholder)") # [cite: 550]
     plan_steps = state.get("plan_steps", [])
     current_idx = state.get("current_step_index", 0)
     step_info = plan_steps[current_idx] if plan_steps and 0 <= current_idx < len(plan_steps) else {}
@@ -180,118 +235,103 @@ async def placeholder_controller_node(state: ResearchAgentState, config: Runnabl
             "controller_output_tool_input": "placeholder_input_for_tool"}
 
 async def placeholder_executor_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    logger.info(">>> NODE: Executor (Placeholder - For PLAN path)")
+    logger.info(">>> NODE: Executor (Placeholder)") # [cite: 551]
     tool_name = state.get("controller_output_tool_name", "None")
     tool_input = state.get("controller_output_tool_input", "")
-    logger.info(f"Executing tool (Plan Path): {tool_name} with input: {tool_input}")
-    output = f"Placeholder output from {tool_name} (Plan Path)."
+    logger.info(f"Executing tool: {tool_name} with input: {tool_input}")
+    output = f"Placeholder output from {tool_name}."
     return {"executor_output": output}
 
 async def placeholder_step_evaluator_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    logger.info(">>> NODE: Step Evaluator (Placeholder)")
+    logger.info(">>> NODE: Step Evaluator (Placeholder)") # [cite: 552]
     current_idx = state.get("current_step_index", 0)
     executor_out = state.get("executor_output", "")
     eval_output = {"step_achieved_goal": True, "assessment_of_step": "Placeholder: Step looks good.", "is_recoverable_via_retry": False}
     logger.info(f"Step {current_idx + 1} evaluation: Achieved={eval_output['step_achieved_goal']}")
-    new_accumulated_summary = state.get("accumulated_plan_summary", "") + f"Step {current_idx + 1} Output: {executor_out[:100]}\n"
+    new_accumulated_summary = state.get("accumulated_plan_summary", "") + f"Step {current_idx + 1} Output: {executor_out[:100]}\n" # [cite: 552]
     if eval_output["step_achieved_goal"]:
         return {"step_evaluator_output": eval_output, "previous_step_executor_output": executor_out, "retry_count_for_current_step": 0, "accumulated_plan_summary": new_accumulated_summary}
     else: 
         return {"step_evaluator_output": eval_output, "previous_step_executor_output": None, "accumulated_plan_summary": new_accumulated_summary + f"Step {current_idx + 1} Failed Assessment: {eval_output['assessment_of_step']}\n"}
 
-
 async def overall_evaluator_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
-    logger.info(">>> NODE: Overall Evaluator")
+    logger.info(">>> NODE: Overall Evaluator") # [cite: 553]
     
-    is_direct_flow = state.get("is_direct_qa_flow", False) 
-    final_content_to_present = state.get("executor_output", "No direct answer or tool output was generated.")
-
-    if is_direct_flow and state.get("direct_tool_request_error"):
-        final_content_to_present = f"Error in direct tool request: {state.get('direct_tool_request_error')}\nFallback output: {final_content_to_present}"
-        logger.warning(f"OverallEvaluatorNode: Direct tool request had an error: {state.get('direct_tool_request_error')}")
-    elif not is_direct_flow : # Plan execution flow
-        logger.info(f"OverallEvaluatorNode: Processing plan execution outcome.")
+    final_assessment_text = "Evaluation: Processing complete."
+    is_direct_qa = state.get("is_direct_qa_flow", False) # [cite: 553]
+    
+    if is_direct_qa:
+        raw_answer = state.get("executor_output", "No direct answer was generated.") # [cite: 553]
+        logger.info(f"OverallEvaluatorNode: Processing direct QA response: {raw_answer[:200]}...")
+        final_assessment_text = raw_answer # [cite: 554]
+    else: # Plan execution flow
+        logger.info(f"OverallEvaluatorNode: Processing plan execution outcome.") # [cite: 555]
         logger.info(f"Accumulated Plan Summary for Eval:\n{state.get('accumulated_plan_summary')}")
-        # For plan, final_content_to_present is already the last step's output or overall summary
-    
-    logger.info(f"OverallEvaluatorNode: Content to potentially present to LLM: {final_content_to_present[:200]}...")
-    
-    llm_id_str = state.get("evaluator_llm_id") 
-    provider = settings.evaluator_provider 
-    model_name = settings.evaluator_model_name 
-    if llm_id_str:
+        final_assessment_text = state.get("executor_output", "Plan execution completed. See logs for details.") # [cite: 556]
+
+    llm_id_str = state.get("evaluator_llm_id") # [cite: 557]
+    if not llm_id_str:
+        logger.warning("OverallEvaluatorNode: evaluator_llm_id not found in state. Using system default.")
+        provider = settings.evaluator_provider
+        model_name = settings.evaluator_model_name
+    else:
         try: provider, model_name = llm_id_str.split("::", 1)
         except ValueError:
-            logger.warning(f"OverallEvaluatorNode: Invalid LLM ID format '{llm_id_str}'. Using system default.")
-    else:
-        logger.warning("OverallEvaluatorNode: evaluator_llm_id not found in state. Using system default.")
+            logger.warning(f"OverallEvaluatorNode: Invalid LLM ID format '{llm_id_str}'. Using system default.") # [cite: 558]
+            provider = settings.evaluator_provider
+            model_name = settings.evaluator_model_name
             
     logger.info(f"OverallEvaluatorNode: Using LLM {provider}::{model_name} to finalize output.")
     try:
-        finalizing_llm = get_llm(settings, provider=provider, model_name=model_name, requested_for_role="OverallEvaluator_Finalize")
-        
-        # --- MODIFICATION START: Conditional Prompting ---
-        prompt_template_str = "Present the following information as the agent's final response: {assessment_text}" # Default
-        
-        # Check if the content came from a 'read_file' tool in a direct tool request
-        is_read_file_direct_request = (
-            state.get("classified_intent") == "DIRECT_TOOL_REQUEST" and
-            state.get("identified_tool_name") == "read_file"
+        # Pass callbacks from config to get_llm
+        finalizing_llm = get_llm(
+            settings, provider=provider, model_name=model_name, 
+            callbacks=config.get("callbacks"), # Pass graph's callbacks
+            requested_for_role="OverallEvaluator_Finalize"
         )
-
-        if is_read_file_direct_request:
-            logger.info("OverallEvaluatorNode: Detected 'read_file' output for direct tool request. Using specific presentation prompt.")
-            
-            MAX_FILE_CONTENT_DISPLAY_LENGTH = 15000 # Max characters to show from file directly to LLM for presentation
-            original_length = len(final_content_to_present)
-
-            if original_length > MAX_FILE_CONTENT_DISPLAY_LENGTH:
-                final_content_to_present = final_content_to_present[:MAX_FILE_CONTENT_DISPLAY_LENGTH] + \
-                                           f"\n\n[... Content truncated by agent. Original length: {original_length} characters. Full content available in workspace file.]"
-                logger.info(f"OverallEvaluatorNode: Truncated 'read_file' content for LLM presentation. Original: {original_length}, Truncated: {len(final_content_to_present)}")
-
-            prompt_template_str = (
-                "The user requested to read a file. The content (or a truncated version if it was very long) is provided below. "
-                "Present this content directly as the agent's response. Avoid conversational additions unless the content itself is conversational. "
-                "If the content is code or structured data, preserve its formatting as much as possible using Markdown code blocks if appropriate.\n\n"
-                "File Content:\n---\n{assessment_text}\n---"
-            )
-        # --- MODIFICATION END ---
         
-        prompt = ChatPromptTemplate.from_template(prompt_template_str)
-        chain = prompt | finalizing_llm
+        prompt = ChatPromptTemplate.from_template("Present the following information as the agent's final response: {assessment_text}") # [cite: 560]
+        chain = prompt | finalizing_llm # [cite: 561]
         
-        logger.info(f"OverallEvaluatorNode: Invoking LLM to finalize assessment (snippet): '{final_content_to_present[:100]}...'")
-        final_response_message_obj = await chain.ainvoke({"assessment_text": final_content_to_present}, config=config) 
+        logger.info(f"OverallEvaluatorNode: Invoking LLM to finalize assessment: '{final_assessment_text[:100]}...'")
+        final_response_message_obj = await chain.ainvoke({"assessment_text": final_assessment_text}, config=config) # Pass config to chain
         
-        final_content_for_state = final_response_message_obj.content if hasattr(final_response_message_obj, 'content') else str(final_response_message_obj)
-        logger.info(f"OverallEvaluatorNode: Finalized response for state (snippet): {final_content_for_state[:200]}...")
+        final_content_for_state = final_response_message_obj.content if hasattr(final_response_message_obj, 'content') else str(final_response_message_obj) # [cite: 563]
+        logger.info(f"OverallEvaluatorNode: Finalized response for state: {final_content_for_state[:200]}...")
         return {"overall_evaluator_output": {"assessment": final_content_for_state, "overall_success": True}}
 
     except Exception as e:
-        logger.error(f"OverallEvaluatorNode: Error during final LLM invocation: {e}", exc_info=True)
-        # Fallback: use the raw content without LLM finalization if LLM fails
-        return {"overall_evaluator_output": {"assessment": f"Error finalizing response. Original content: {final_content_to_present}", "overall_success": False}}
+        logger.error(f"OverallEvaluatorNode: Error during final LLM invocation: {e}", exc_info=True) # [cite: 564]
+        return {"overall_evaluator_output": {"assessment": f"Error finalizing response: {final_assessment_text}", "overall_success": False}} # [cite: 567]
 
 
 # --- Conditional Edge Logic ---
-def should_proceed_to_plan_or_qa_or_tool(state: ResearchAgentState, config: RunnableConfig) -> str: 
-    logger.info("--- DECISION: Plan, Direct QA, or Direct Tool Request? ---")
+def should_proceed_to_plan_or_qa(state: ResearchAgentState) -> str: # Removed config as it's not used here
+    logger.info("--- DECISION: Plan or Direct QA? ---")
     intent = state.get("classified_intent")
     if intent == "PLAN":
         logger.info(f"Intent is '{intent}', proceeding to Planner.")
         return "planner"
-    elif intent == "DIRECT_TOOL_REQUEST":
-        logger.info(f"Intent is '{intent}', proceeding to Direct Tool Executor.")
-        return "direct_tool_executor" 
     elif intent == "DIRECT_QA":
-        logger.info(f"Intent is '{intent}', proceeding to Direct QA (LLM only).")
+        logger.info(f"Intent is '{intent}', proceeding to Direct QA.")
         return "direct_qa"
+    # <<< START MODIFIED Fallback for failed plan generation >>>
+    elif state.get("plan_generation_error"): # If planning failed in planner_node
+        logger.warning(f"Planning failed with error: {state['plan_generation_error']}. Routing to overall_evaluator for error reporting.")
+        # Ensure executor_output is set to the error for overall_evaluator to present
+        state["executor_output"] = f"Planning failed: {state['plan_generation_error']}"
+        state["is_direct_qa_flow"] = True # Treat as direct flow for error presentation
+        return "overall_evaluator"
+    # <<< END MODIFIED Fallback for failed plan generation >>>
     else:
-        logger.warning(f"Unknown intent '{intent}', defaulting to Direct QA.")
-        return "direct_qa" 
+        logger.warning(f"Unknown intent '{intent}', defaulting to Direct QA.") # [cite: 568]
+        # Ensure executor_output is set to indicate an issue if intent is truly unknown
+        state["executor_output"] = f"System Error: Intent classification resulted in an unknown state ('{intent}'). Cannot proceed."
+        state["is_direct_qa_flow"] = True # Treat as direct flow for error presentation
+        return "overall_evaluator" # Route to overall_evaluator to present the error
 
-def should_retry_step_or_proceed(state: ResearchAgentState, config: RunnableConfig) -> str:
+
+def should_retry_step_or_proceed(state: ResearchAgentState) -> str: # Removed config
     logger.info("--- DECISION: Step Outcome - Retry, Next Step, or Evaluate Overall? ---")
     step_eval = state.get("step_evaluator_output", {})
     current_retries = state.get("retry_count_for_current_step", 0)
@@ -299,72 +339,95 @@ def should_retry_step_or_proceed(state: ResearchAgentState, config: RunnableConf
 
     if not step_eval.get("step_achieved_goal", False):
         if step_eval.get("is_recoverable_via_retry", False) and current_retries < max_retries:
-            logger.info(f"Step failed but is recoverable. Will attempt retry {current_retries + 1} of {max_retries}.")
+            logger.info(f"Step failed but is recoverable. Will attempt retry {current_retries + 1} of {max_retries}.") # [cite: 569]
             return "retry_step"
         else:
             logger.info("Step failed and is not recoverable or retries exhausted. Proceeding to overall plan evaluation.")
+            # Populate executor_output with error for overall_evaluator
+            state["executor_output"] = state.get("accumulated_plan_summary", "") + \
+                                     f"\nStep {state.get('current_step_index', 0) + 1} ultimately failed. " + \
+                                     (step_eval.get('assessment_of_step') or "No specific assessment provided.")
             return "evaluate_overall_plan"
     else:
         logger.info("Step succeeded. Checking for more steps in the plan.")
-        plan_steps = state.get("plan_steps", []) # Ensure plan_steps is treated as a list
-        current_idx = state.get("current_step_index", -1)
-        # Check if plan_steps is not None and current_idx is valid before accessing length
-        if plan_steps and current_idx + 1 < len(plan_steps):
+        plan_steps = state.get("plan_steps", [])
+        current_idx = state.get("current_step_index", -1) # [cite: 570]
+        if current_idx + 1 < len(plan_steps):
             logger.info(f"More steps exist. Will proceed to step {current_idx + 2} (index {current_idx + 1}).")
             return "next_step"
         else:
-            logger.info("No more steps in plan or plan_steps is empty/None. Proceeding to overall plan evaluation.")
-            return "evaluate_overall_plan"
+            logger.info("No more steps in plan. Proceeding to overall plan evaluation.")
+            # The final executor_output from the last successful step is already in state.executor_output
+            return "evaluate_overall_plan" # [cite: 571]
 
-# --- Utility nodes for state updates (for PLAN path) ---
-def increment_retry_count_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
+# --- Utility nodes for state updates ---
+def increment_retry_count_node(state: ResearchAgentState) -> Dict[str, Any]: # Removed config
     logger.info(">>> UTILITY NODE: Incrementing Retry Count")
     current_retries = state.get("retry_count_for_current_step", 0)
     return {"retry_count_for_current_step": current_retries + 1}
 
-def advance_to_next_step_node(state: ResearchAgentState, config: RunnableConfig) -> Dict[str, Any]:
+def advance_to_next_step_node(state: ResearchAgentState) -> Dict[str, Any]: # Removed config
     logger.info(">>> UTILITY NODE: Advancing to Next Step")
     current_idx = state.get("current_step_index", -1)
     return {"current_step_index": current_idx + 1, "retry_count_for_current_step": 0}
 
 # --- Graph Definition Function ---
-def create_research_agent_graph():
+def create_research_agent_graph(): # [cite: 572]
     logger.info("Building Research Agent Graph...")
     workflow = StateGraph(ResearchAgentState)
 
+    # Add Nodes
     workflow.add_node("intent_classifier", intent_classifier_node)
-    workflow.add_node("direct_qa", direct_qa_node) 
-    workflow.add_node("direct_tool_executor", direct_tool_executor_node) 
-    workflow.add_node("planner", placeholder_planner_node) 
-    workflow.add_node("controller", placeholder_controller_node) 
-    workflow.add_node("executor", placeholder_executor_node) 
-    workflow.add_node("step_evaluator", placeholder_step_evaluator_node) 
+    workflow.add_node("direct_qa", direct_qa_node)
+    workflow.add_node("planner", planner_node) # <<< UPDATED from placeholder_planner_node
+    workflow.add_node("controller", placeholder_controller_node)
+    workflow.add_node("executor", placeholder_executor_node)
+    workflow.add_node("step_evaluator", placeholder_step_evaluator_node)
     workflow.add_node("overall_evaluator", overall_evaluator_node)
     
-    workflow.add_node("increment_retry_count", increment_retry_count_node)
-    workflow.add_node("advance_to_next_step", advance_to_next_step_node)
+    workflow.add_node("increment_retry_count", increment_retry_count_node) # [cite: 573]
+    workflow.add_node("advance_to_next_step", advance_to_next_step_node) # [cite: 573]
 
+    # --- Define Edges ---
     workflow.set_entry_point("intent_classifier")
 
     workflow.add_conditional_edges(
         "intent_classifier",
-        should_proceed_to_plan_or_qa_or_tool, 
+        should_proceed_to_plan_or_qa,
         {
             "planner": "planner", 
-            "direct_tool_executor": "direct_tool_executor", 
-            "direct_qa": "direct_qa"
+            "direct_qa": "direct_qa",
+            "overall_evaluator": "overall_evaluator" # Added edge for plan_generation_error
         }
     )
+    
+    # <<< START MODIFIED Planner to Controller or Overall Evaluator (if planning failed) >>>
+    # If planner_node results in plan_generation_error, it should go to overall_evaluator.
+    # Otherwise, it goes to controller. This conditional logic is now inside `should_proceed_to_plan_or_qa`
+    # if we consider planning part of intent resolution.
+    # Alternatively, add a dedicated conditional edge from planner if it can fail gracefully.
+    # For now, `should_proceed_to_plan_or_qa` handles the error from planner if planner sets `plan_generation_error`
+    # and the intent was PLAN. If planner itself is a separate step from intent classification's direct routing:
+    workflow.add_conditional_edges(
+        "planner",
+        lambda state: "overall_evaluator" if state.get("plan_generation_error") else "controller",
+        {
+            "controller": "controller",
+            "overall_evaluator": "overall_evaluator" # For plan generation failure
+        }
+    )
+    # <<< END MODIFIED Planner Edge >>>
+
 
     workflow.add_edge("direct_qa", "overall_evaluator") 
-    workflow.add_edge("direct_tool_executor", "overall_evaluator") 
 
-    workflow.add_edge("planner", "controller")
+    # Path for Planning (successful plan generation)
+    # workflow.add_edge("planner", "controller") # This is now conditional from planner
     workflow.add_edge("controller", "executor")
     workflow.add_edge("executor", "step_evaluator")
 
     workflow.add_conditional_edges(
-        "step_evaluator",
+        "step_evaluator", # [cite: 574]
         should_retry_step_or_proceed,
         {
             "retry_step": "increment_retry_count",
@@ -373,18 +436,19 @@ def create_research_agent_graph():
         }
     )
     
-    workflow.add_edge("increment_retry_count", "controller") 
-    workflow.add_edge("advance_to_next_step", "controller") 
+    workflow.add_edge("increment_retry_count", "controller")
+    workflow.add_edge("advance_to_next_step", "controller")
 
     workflow.add_edge("overall_evaluator", END)
 
     logger.info("Compiling Research Agent Graph...")
-    app = workflow.compile()
+    app = workflow.compile() # [cite: 575]
     logger.info("Research Agent Graph compiled successfully.")
     return app
 
-research_agent_graph = create_research_agent_graph()
-logger.info(f"Module-level variable 'research_agent_graph' (compiled graph app) created. Type: {type(research_agent_graph)}")
+# --- Create and export the compiled graph instance ---
+research_agent_graph = create_research_agent_graph() # [cite: 576]
+logger.info(f"Module-level variable 'research_agent_graph' (compiled graph app) created. Type: {type(research_agent_graph)}") # [cite: 576]
 
 if __name__ == "__main__":
     logging.basicConfig(
@@ -392,5 +456,58 @@ if __name__ == "__main__":
         format='%(asctime)s - %(levelname)s - %(name)s [%(module)s.%(funcName)s:%(lineno)d] - %(message)s'
     )
     logger.info("Running langgraph_agent.py directly for testing graph compilation and structure.")
-    logger.info("langgraph_agent.py finished execution if run as __main__.")
+    
+    # Basic test for planner node invocation (conceptual)
+    async def test_graph_with_plan_intent():
+        print("\n--- Testing Graph with PLAN Intent ---")
+        initial_state_plan = ResearchAgentState(
+            user_query="Develop a strategy to market a new AI-powered coffee machine.",
+            classified_intent="PLAN", # This would normally be set by an external classifier or first node
+            current_task_id="test_task_001",
+            chat_history=[],
+            # Provide LLM IDs for the nodes
+            planner_llm_id=f"{settings.planner_provider}::{settings.planner_model_name}", # Example
+            # ... other LLM IDs if needed by other nodes in this specific test path
+        )
+        
+        # Mock callbacks for testing
+        class TestCallbackHandler:
+            async def on_llm_start(self, serialized, prompts, **kwargs): print(f"  [Callback] LLM Start: {kwargs.get('metadata', {}).get('langgraph_node', 'UnknownNode')}, Prompts: {str(prompts)[:100]}...")
+            async def on_llm_end(self, response, **kwargs): print(f"  [Callback] LLM End: {kwargs.get('metadata', {}).get('langgraph_node', 'UnknownNode')}, Response: {str(response.generations[0][0].text)[:100]}...")
+            async def on_chain_start(self, serialized, inputs, **kwargs): print(f"  [Callback] Chain Start: {serialized.get('name')}, Node: {kwargs.get('metadata', {}).get('langgraph_node', 'UnknownNode')}")
+            async def on_chain_end(self, outputs, **kwargs): print(f"  [Callback] Chain End: {kwargs.get('metadata', {}).get('langgraph_node', 'UnknownNode')}, Output Keys: {list(outputs.keys())}")
+        
+        test_callbacks = [TestCallbackHandler()]
+        test_config = RunnableConfig(callbacks=test_callbacks, configurable={"task_id": "test_task_001"})
 
+        print(f"Initial State for PLAN test: {initial_state_plan}")
+        final_state = None
+        try:
+            async for event in research_agent_graph.astream_events(initial_state_plan, config=test_config, version="v1"):
+                node_name = event.get("name", "graph_event")
+                event_type = event.get("event")
+                tags = event.get("tags", [])
+                print(f"Event: {event_type} for Node/Event: {node_name}, Tags: {tags}")
+                if event_type == "on_chain_end" and "data" in event and "output" in event["data"]:
+                    print(f"  Output from {node_name}: {str(event['data']['output'])[:200]}...")
+                    if node_name == "planner": # Check output of planner node
+                        assert "plan_steps" in event["data"]["output"], "Planner output missing plan_steps"
+                        assert "plan_summary" in event["data"]["output"], "Planner output missing plan_summary"
+                        print(f"  Planner produced {len(event['data']['output'].get('plan_steps',[]))} steps.")
+                if event_type == "on_graph_end":
+                    final_state = event["data"]["output"]
+            
+            print("\n--- Final State after PLAN test ---")
+            if final_state:
+                print(f"  Plan Summary: {final_state.get('plan_summary')}")
+                print(f"  Plan Steps: {final_state.get('plan_steps')}")
+                print(f"  Plan Error: {final_state.get('plan_generation_error')}")
+                print(f"  Overall Eval Assessment: {final_state.get('overall_evaluator_output', {}).get('assessment')}")
+
+        except Exception as e:
+            print(f"Error during PLAN graph execution test: {e}")
+            import traceback
+            traceback.print_exc()
+
+    asyncio.run(test_graph_with_plan_intent())
+    logger.info("langgraph_agent.py finished execution if run as __main__.")
