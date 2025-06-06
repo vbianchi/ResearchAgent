@@ -2,36 +2,18 @@ version: '3.8'
 
 services:
   backend:
-    build: . # Build the image from the Dockerfile in the current directory
+    build: .
     container_name: research_agent_backend
-    # --- MODIFIED: Use host network mode ---
-    # This makes the container share the host's (WSL's) network stack.
-    # The 'ports' section below will be ignored when using host mode.
     network_mode: host
-    # ports: # Ignored when network_mode is host
-    #   - "8765:8765" # Map host port 8765 to container port 8765 (WebSocket)
-    #   - "8766:8766" # Map host port 8766 to container port 8766 (File Server)
+    
+    # <<< START MODIFICATION: Update volume mounts >>>
+    # We will mount the entire current directory to /app
+    # This ensures that any file created in /app inside the container
+    # will appear in our local project directory.
     volumes:
-      # Mount local code into the container for development
-      # Changes in local ./backend reflect inside the container at /app/backend
-      - ./backend:/app/backend
-      # Mount local workspace into the container's workspace
-      # Files created by the agent persist locally
-      - ./workspace:/app/workspace
-      # Mount local database directory into the container
-      # Database file persists locally
-      - ./database:/app/database
-      # Mount the local .env file into the container
-      # Provides API keys and configuration to the running app
-      - ./.env:/app/.env
-    # Ensure the container restarts automatically if it crashes (optional)
+      - .:/app
+    # <<< END MODIFICATION >>>
+
     restart: unless-stopped
-    # Use the .env file in the project root for environment variables within the container
     env_file:
       - .env
-
-# --- Optional: Define networks if not using host mode ---
-# networks:
-#   default:
-#     driver: bridge
-
