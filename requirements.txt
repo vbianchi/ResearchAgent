@@ -19,17 +19,16 @@ langchain-ollama>=0.1.0
 langchain-tavily>=0.1.0
 
 # --- LangGraph ---
-langgraph>=0.0.30 # Or a more recent version if known, starting with a reasonable one
+langgraph>=0.0.60
 
 # --- Tool Dependencies ---
 duckduckgo-search>=5.0
 beautifulsoup4>=4.12
 lxml>=5.0
 aiofiles>=23.0
-matplotlib>=3.0 # Needed for plotting examples
-biopython>=1.80 # Added for PubMed/Entrez search
-pypdf>=4.0.0 # Added for PDF reading
-playwright
+matplotlib>=3.0
+biopython>=1.80
+pypdf>=4.0.0
 
 # --- Database ---
-aiosqlite>=0.19 # Added for async SQLite operations
+aiosqlite>=0.19

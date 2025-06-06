@@ -14,13 +14,11 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 WORKDIR /app
 
 # <<< --- START: Install curl and other system dependencies --- >>>
-# Update package lists and install curl along with build essentials if needed later
-# Using apt-get directly here for system packages
+# Update package lists and install curl. Other build dependencies removed as they are no longer needed.
 RUN apt-get update && apt-get install -y \
     curl \
-    # Add any other essential system packages here if needed in the future (e.g., build-essential for C extensions)
     && rm -rf /var/lib/apt/lists/* # Clean up apt cache
-# <<< --- END: Install curl --- >>>
+# <<< --- END: Install system dependencies --- >>>
 
 
 # Install uv (faster package installer) - Recommended based on README
@@ -30,18 +28,10 @@ RUN python3 -m pip install uv
 
 # Copy only the requirements file first to leverage Docker cache
 COPY requirements.txt .
-
 # Install dependencies using uv (system-wide within the container)
 # Using --system as recommended by uv for Docker base images
 # Use python3 explicitly to invoke uv module
 RUN python3 -m uv pip install --system -r requirements.txt
-
-# Install Playwright browser(s) and their OS dependencies.
-# We're choosing Chromium here. You can add 'firefox' or 'webkit' if needed.
-# The '--with-deps' flag attempts to install necessary OS libraries for the browser.
-RUN playwright install --with-deps chromium
-# To install all browsers:
-# RUN playwright install --with-deps
 
 # Copy the rest of the application code into the container
 # Note: For development, this will be overlaid by the volume mount in docker-compose.yml
@@ -54,4 +44,3 @@ EXPOSE 8766
 # Define the command to run the application
 # Use python3 explicitly
 CMD ["python3", "-m", "backend.server"]
-
