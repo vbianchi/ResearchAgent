@@ -14,47 +14,61 @@ class IntentClassificationOutput(BaseModel):
     """
     Defines the structured output for the Intent Classifier LLM.
     """
-    intent: str = Field(description="The classified intent. Must be one of ['PLAN', 'DIRECT_QA', 'DIRECT_TOOL_REQUEST'].")
+    intent: str = Field(description="The classified intent. Must be one of ['PLAN', 'DIRECT_TOOL_REQUEST', 'DIRECT_QA'].")
     reasoning: Optional[str] = Field(description="Brief reasoning for the classification.", default=None)
     tool_name: Optional[str] = Field(default=None, description="If intent is DIRECT_TOOL_REQUEST, the name of the tool to use.")
     tool_input: Optional[Union[str, Dict[str, Any]]] = Field(default=None, description="If intent is DIRECT_TOOL_REQUEST, the input for the tool.")
 
 
-INTENT_CLASSIFIER_SYSTEM_PROMPT_TEMPLATE = """You are an expert AI assistant responsible for classifying user intent.
-Your goal is to determine if a user's query requires a multi-step plan, a direct answer, or a direct specific tool request.
+# <<< START REVISED PROMPT TEMPLATE >>>
+INTENT_CLASSIFIER_SYSTEM_PROMPT_TEMPLATE = """You are an expert AI assistant responsible for classifying user intent. Your goal is to analyze the user's query and determine the most efficient path for the agent to take.
 
-Available intents:
--   "PLAN": Use this if the query implies a multi-step process, requires breaking down into sub-tasks, involves creating or manipulating multiple pieces of data, or clearly needs a sequence of tool uses. Examples:
+Follow this decision hierarchy:
+1.  Is the query complex and requires a sequence of multiple actions or tools to be resolved? If YES, classify as **"PLAN"**.
+2.  If not a plan, can the query be fully resolved by a **single call** to one of the available tools? If YES, classify as **"DIRECT_TOOL_REQUEST"**.
+3.  If it's neither a plan nor a direct tool request, is it a simple question I can answer with my internal knowledge, a conversational remark, or a request for brainstorming? If YES, classify as **"DIRECT_QA"**.
+
+Here are the detailed descriptions for each intent:
+
+### 1. "PLAN"
+-   **Use Case**: The query implies a multi-step process, requires breaking down into sub-tasks, involves creating and manipulating multiple pieces of data, or clearly needs a sequence of different tool uses.
+-   **Examples**:
     - "Research the latest treatments for X, summarize them, and write a report."
     - "Find three recent news articles about Y, extract key points from each, and compare them."
--   "DIRECT_QA": Use this if the query is a straightforward question, a request for a simple definition or explanation, a request for brainstorming, a simple calculation, or a conversational remark that doesn't require a complex plan or specific tool. The agent can likely answer this using its internal knowledge. Examples:
-    - "What is the capital of France?"
-    - "Explain the concept of X in simple terms."
-    - "Tell me a fun fact."
--   "DIRECT_TOOL_REQUEST": Use this if the query explicitly asks to use a specific known tool or implies a single, direct action that maps clearly to one of the available tools. You MUST also identify the `tool_name` and formulate the `tool_input`.
-    - The `tool_name` MUST be one of these: {tool_names_for_prompt}
-    - The `tool_input` should be the appropriate input string or JSON string for that specific tool, based on its description:
-        {tools_summary_for_prompt}
-    - Examples:
-        - "Use tavily_search_api to find out about X." -> intent: DIRECT_TOOL_REQUEST, tool_name: tavily_search_api, tool_input: {{"query": "X"}}
-        - "What's the weather like today?" (Assume 'weather_tool' is available) -> intent: DIRECT_TOOL_REQUEST, tool_name: weather_tool, tool_input: {{"location": "current"}}
-        - "Read the content of the file 'report.txt'." -> intent: DIRECT_TOOL_REQUEST, tool_name: read_file, tool_input: "report.txt"
+    - "Download the data from Z, process it, and generate a plot."
 
-Consider the complexity and the likely number of distinct operations or tool uses implied by the query.
-If the query asks to use a specific tool, it is almost always a "DIRECT_TOOL_REQUEST".
+### 2. "DIRECT_TOOL_REQUEST"
+-   **Use Case**: The query can be fully and directly answered by using a **single** available tool. This is for explicit tool requests or implicit requests that map cleanly to one tool's function.
+-   **Task**: You MUST identify the `tool_name` and formulate the `tool_input`.
+-   The `tool_name` MUST be one of these: {tool_names_for_prompt}
+-   The `tool_input` should be the appropriate input string or JSON string for that specific tool.
+-   **Examples**:
+    - "Use tavily_search_api to find out about recent AI developments." -> intent: DIRECT_TOOL_REQUEST, tool_name: tavily_search_api, tool_input: {{"query": "recent AI developments"}}
+    - "Read the content of the file 'analysis_summary.txt'." -> intent: DIRECT_TOOL_REQUEST, tool_name: read_file, tool_input: "analysis_summary.txt"
+    - "Search for news about lung cancer immunotherapy." -> intent: DIRECT_TOOL_REQUEST, tool_name: tavily_search_api, tool_input: {{"query": "news about lung cancer immunotherapy"}}
+    - "What is the weather in Zurich?" -> (This implies a single call to a hypothetical 'weather' tool, so you would classify it as a DIRECT_TOOL_REQUEST if such a tool were available).
 
-Respond with a single JSON object matching the following schema:
+### 3. "DIRECT_QA"
+-   **Use Case**: The query is a straightforward question, a request for a simple definition or explanation, a request for brainstorming, a simple calculation, or a conversational remark that **does not require any tools**. The agent can answer this using its own internal knowledge.
+-   **Examples**:
+    - "Explain the concept of neural networks in simple terms."
+    - "Tell me a fun fact about Switzerland."
+    - "Can you help me brainstorm ideas for a project about renewable energy?"
+    - "Thanks, that was helpful!"
+    - "What is 2 + 2?"
+
+**Your Response Format:**
+Respond with a single JSON object matching the following schema. Do not include any preamble or explanation outside of the JSON object.
 {format_instructions}
-
-Do not include any preamble or explanation outside of the JSON object.
 """
+# <<< END REVISED PROMPT TEMPLATE >>>
 
 
 async def classify_intent(
     user_query: str,
     session_data_entry: Dict[str, Any],
-    tool_names_for_prompt: str, # <<< ENSURE THIS PARAMETER EXISTS
-    tools_summary_for_prompt: str # <<< ENSURE THIS PARAMETER EXISTS
+    tool_names_for_prompt: str,
+    tools_summary_for_prompt: str
 ) -> Union[IntentClassificationOutput, str]:
     """
     Classifies the user's intent.
@@ -100,7 +114,8 @@ async def classify_intent(
         tool_names_for_prompt=tool_names_for_prompt,
         tools_summary_for_prompt=tools_summary_for_prompt,
         format_instructions=format_instructions
-    )
+    ).replace('{"query": "X"}', '{{"query": "X"}}').replace('{"location": "current"}', '{{"location": "current"}}')
+
     human_template = "User Query: \"{user_query}\"\nClassify the intent of the user query."
 
     prompt = ChatPromptTemplate.from_messages([
@@ -135,8 +150,7 @@ async def classify_intent(
         logger.error(f"IntentClassifier: Error during intent classification: {e}", exc_info=True)
         try:
             error_chain = prompt | intent_llm | StrOutputParser()
-            raw_output_params = {"user_query": user_query} # format_instructions is already in system_prompt_filled
-            raw_output = await error_chain.ainvoke(raw_output_params)
+            raw_output = await error_chain.ainvoke({"user_query": user_query})
             logger.error(f"IntentClassifier: Raw LLM output on error: {raw_output[:500]}...")
         except Exception as raw_e:
             logger.error(f"IntentClassifier: Failed to get raw LLM output during error: {raw_e}")

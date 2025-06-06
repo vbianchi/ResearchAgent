@@ -11,15 +11,21 @@ from typing import Dict, Any, Callable, Coroutine, Optional, List
 from langchain_core.messages import AIMessage, HumanMessage
 
 from backend.config import settings
-from backend.tool_loader import get_task_workspace_path, BASE_WORKSPACE_ROOT # Corrected import
+from backend.tool_loader import get_task_workspace_path, BASE_WORKSPACE_ROOT
 
-from backend.callbacks import (
-    SUB_TYPE_SUB_STATUS,
-    SUB_TYPE_THOUGHT,
-    DB_MSG_TYPE_SUB_STATUS,
-    DB_MSG_TYPE_THOUGHT,
-    DB_MSG_TYPE_TOOL_RESULT_FOR_CHAT
-)
+# <<< START MODIFICATION: Remove faulty import and define constants locally >>>
+# Constants for message types stored in the DB, previously imported
+DB_MSG_TYPE_SUB_STATUS = "agent_sub_status"
+DB_MSG_TYPE_THOUGHT = "agent_thought"
+DB_MSG_TYPE_TOOL_RESULT_FOR_CHAT = "tool_result_for_chat"
+DB_MSG_TYPE_MAJOR_STEP = "db_major_step_announcement"
+
+# Constants for UI subtype rendering, previously imported
+# Now using string literals directly in the code where needed.
+# SUB_TYPE_SUB_STATUS = "sub_status"
+# SUB_TYPE_THOUGHT = "thought"
+# <<< END MODIFICATION >>>
+
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +38,6 @@ DBDeleteTaskFunc = Callable[[str], Coroutine[Any, Any, bool]]
 DBRenameTaskFunc = Callable[[str, str], Coroutine[Any, Any, bool]]
 GetArtifactsFunc = Callable[[str], Coroutine[Any, Any, List[Dict[str, str]]]]
 
-DB_MSG_TYPE_MAJOR_STEP = "db_major_step_announcement"
 
 INTERNAL_DB_MESSAGE_TYPES_FOR_MONITOR_REPLAY_ONLY = {
     "SYSTEM_INTENT_CLASSIFIED",
@@ -51,16 +56,18 @@ INTERNAL_DB_MESSAGE_TYPES_FOR_MONITOR_REPLAY_ONLY = {
     "system_task_renamed",
     "system_llm_set",
     "system_plan_generated",
+    "system_plan_confirmed",
     "system_plan_cancelled",
     "system_direct_qa",
     "system_direct_qa_finish",
+    "system_direct_tool_request",
     "system_plan_step_start",
     "system_plan_step_end",
     "system_plan_end",
     "error_json",
     "error_unknown_msg",
     "error_processing",
-    "monitor_user_input", # <<< ADDED 'monitor_user_input' HERE
+    "monitor_user_input",
 }
 
 
@@ -71,7 +78,7 @@ async def process_context_switch(
     db_add_task_func: DBAddTaskFunc,
     db_get_messages_func: DBGetMessagesFunc,
     get_artifacts_func: GetArtifactsFunc,
-    db_add_message_func: Optional[DBAddMessageFunc] = None # This was in server.py, might not be needed here
+    db_add_message_func: Optional[DBAddMessageFunc] = None
 ) -> None:
     task_id_from_frontend = data.get("taskId")
     task_title_from_frontend = data.get("taskTitle", data.get("task"))
@@ -132,7 +139,7 @@ async def process_context_switch(
             ws_message_type_to_send = None
             ws_payload_to_send = None
 
-            try: # Outer try for processing a single history message
+            try:
                 if db_msg_type == "user_input":
                     ws_message_type_to_send = "user"
                     ws_payload_to_send = {"content": db_content_hist_str}
@@ -140,13 +147,13 @@ async def process_context_switch(
 
                 elif db_msg_type in ["agent_message", "agent_final_assessment"]:
                     ws_message_type_to_send = "agent_message"
-                    try: # Inner try for JSON parsing
+                    try:
                         parsed_content = json.loads(db_content_hist_str)
-                        if isinstance(parsed_content, dict) and "content" in parsed_content: # This was line 99
+                        if isinstance(parsed_content, dict) and "content" in parsed_content:
                              ws_payload_to_send = parsed_content
                         else:
                             ws_payload_to_send = {"content": db_content_hist_str, "component_hint": "DEFAULT"}
-                    except json.JSONDecodeError: # Correctly aligned with inner try
+                    except json.JSONDecodeError:
                         ws_payload_to_send = {"content": db_content_hist_str, "component_hint": "DEFAULT"}
                     chat_history_for_langchain_memory.append(AIMessage(content=ws_payload_to_send["content"]))
 
@@ -160,7 +167,7 @@ async def process_context_switch(
                         ws_payload_to_send = json.loads(db_content_hist_str)
                     except json.JSONDecodeError as e:
                         logger.error(f"[{session_id}] Error parsing DB_MSG_TYPE_MAJOR_STEP content: {e}. Data: {db_content_hist_str}")
-                        continue # Skip this message
+                        continue
 
                 elif db_msg_type == DB_MSG_TYPE_SUB_STATUS:
                     ws_message_type_to_send = "agent_thinking_update"
@@ -169,7 +176,7 @@ async def process_context_switch(
                         ws_payload_to_send = {
                             "message": parsed_db_content.get("message_text", "Sub-status message missing"),
                             "component_hint": parsed_db_content.get("component_hint", "SYSTEM"),
-                            "sub_type": SUB_TYPE_SUB_STATUS,
+                            "sub_type": "sub_status", # <<< MODIFIED: Use string literal
                             "status_key": "HISTORICAL_SUB_STATUS"
                         }
                     except json.JSONDecodeError as e:
@@ -186,7 +193,7 @@ async def process_context_switch(
                                 "content_markdown": parsed_db_content.get("thought_content_markdown", "Thought content missing")
                             },
                             "component_hint": parsed_db_content.get("component_hint", "SYSTEM"),
-                            "sub_type": SUB_TYPE_THOUGHT,
+                            "sub_type": "thought", # <<< MODIFIED: Use string literal
                             "status_key": "HISTORICAL_THOUGHT"
                         }
                     except json.JSONDecodeError as e:
@@ -230,9 +237,9 @@ async def process_context_switch(
                     await send_ws_message_func(ws_message_type_to_send, ws_payload_to_send)
                     await asyncio.sleep(0.005)
 
-            except Exception as e: # Outer except for the whole message processing
+            except Exception as e:
                 logger.error(f"[{session_id}] Error processing history message (Type: {db_msg_type}): {e}. Data: {db_content_hist_str[:100]}", exc_info=True)
-                continue # Skip to the next message in history
+                continue
 
         await send_ws_message_func("history_end", {"text": "History loaded."})
         logger.info(f"[{session_id}] Finished sending {len(history_messages)} history messages.")
@@ -261,6 +268,7 @@ async def process_new_task(
     add_monitor_log_func: AddMonitorLogFunc,
     get_artifacts_func: GetArtifactsFunc
 ) -> None:
+    # ... (function content is unchanged) ...
     logger.info(f"[{session_id}] Received 'new_task' signal. Clearing context for UI.")
     session_data_entry['cancellation_requested'] = False
     session_data_entry['current_plan_structured'] = None
@@ -270,20 +278,17 @@ async def process_new_task(
     session_data_entry['original_user_query'] = None
     session_data_entry['active_plan_filename'] = None
     session_data_entry['current_plan_proposal_id_backend'] = None
-
     existing_agent_task = connected_clients_entry.get("agent_task")
     if existing_agent_task and not existing_agent_task.done():
         logger.warning(f"[{session_id}] Cancelling active agent/plan task due to new task signal.")
         existing_agent_task.cancel()
         await send_ws_message_func("status_message", {"text": "Operation cancelled for new task.", "component_hint": "SYSTEM"})
         connected_clients_entry["agent_task"] = None
-
     session_data_entry["current_task_id"] = None
     if "callback_handler" in session_data_entry and hasattr(session_data_entry["callback_handler"], 'set_task_id'):
         session_data_entry["callback_handler"].set_task_id(None)
     if "memory" in session_data_entry and hasattr(session_data_entry["memory"], 'clear'):
         session_data_entry["memory"].clear()
-
     await send_ws_message_func("monitor_log", {
         "text": f"[{datetime.datetime.now().isoformat(timespec='milliseconds')}][{session_id[:8]}] [SYSTEM_EVENT] Cleared context for new task signal. Awaiting new task context switch from client.",
         "log_source": "SYSTEM_NEW_TASK_SIGNAL"
@@ -296,28 +301,25 @@ async def process_delete_task(
     connected_clients_entry: Dict[str, Any], send_ws_message_func: SendWSMessageFunc,
     add_monitor_log_func: AddMonitorLogFunc,
     db_delete_task_func: DBDeleteTaskFunc,
-    get_artifacts_func: GetArtifactsFunc # Keep for consistency, though not used in this version
+    get_artifacts_func: GetArtifactsFunc
 ) -> None:
+    # ... (function content is unchanged) ...
     task_id_to_delete = data.get("taskId")
     if not task_id_to_delete:
         logger.warning(f"[{session_id}] 'delete_task' message missing taskId.")
         await send_ws_message_func("monitor_log", {"text": f"[{datetime.datetime.now().isoformat(timespec='milliseconds')}][{session_id[:8]}] [SYSTEM_ERROR] 'delete_task' received without taskId.", "log_source": "SYSTEM_ERROR"})
         return
-
     logger.warning(f"[{session_id}] Received request to delete task: {task_id_to_delete}")
     await send_ws_message_func("monitor_log", {"text": f"[{datetime.datetime.now().isoformat(timespec='milliseconds')}][{session_id[:8]}] [SYSTEM_EVENT] Received request to delete task: {task_id_to_delete}", "log_source": "SYSTEM_DELETE_REQUEST"})
-
     deleted_from_db = await db_delete_task_func(task_id_to_delete)
-
     if deleted_from_db:
         await send_ws_message_func("monitor_log", {"text": f"[{datetime.datetime.now().isoformat(timespec='milliseconds')}][{session_id[:8]}] [SYSTEM_EVENT] Task {task_id_to_delete} DB entries deleted.", "log_source": "SYSTEM_DELETE_SUCCESS"})
         task_workspace_to_delete: Optional[Path] = None
         try:
             task_workspace_to_delete = get_task_workspace_path(task_id_to_delete, create_if_not_exists=False)
             if await asyncio.to_thread(task_workspace_to_delete.exists):
-                # Security check: ensure we are deleting within the base workspace
                 if task_workspace_to_delete.resolve().is_relative_to(BASE_WORKSPACE_ROOT.resolve()) and \
-                   BASE_WORKSPACE_ROOT.resolve() != task_workspace_to_delete.resolve(): # Don't delete base itself
+                   BASE_WORKSPACE_ROOT.resolve() != task_workspace_to_delete.resolve():
                     logger.info(f"[{session_id}] Attempting to delete workspace directory: {task_workspace_to_delete}")
                     await asyncio.to_thread(shutil.rmtree, task_workspace_to_delete)
                     logger.info(f"[{session_id}] Successfully deleted workspace directory: {task_workspace_to_delete}")
@@ -329,7 +331,6 @@ async def process_delete_task(
         except Exception as ws_del_e:
             logger.error(f"[{session_id}] Error during workspace deletion for task {task_id_to_delete}: {ws_del_e}", exc_info=True)
             await send_ws_message_func("status_message", {"text": f"Task DB deleted, but workspace for {task_id_to_delete[:8]} failed to delete.", "component_hint": "SYSTEM", "isError": True})
-
         if session_data_entry.get("current_task_id") == task_id_to_delete:
             logger.info(f"[{session_id}] Active task {task_id_to_delete} was deleted. Clearing session context.")
             session_data_entry['cancellation_requested'] = False
@@ -348,21 +349,18 @@ async def process_rename_task(
     add_monitor_log_func: AddMonitorLogFunc,
     db_rename_task_func: DBRenameTaskFunc
 ) -> None:
+    # ... (function content is unchanged) ...
     task_id_to_rename = data.get("taskId")
     new_name = data.get("newName")
-
     if not task_id_to_rename or not new_name:
         logger.warning(f"[{session_id}] Received invalid rename_task message: {data}")
         await send_ws_message_func("monitor_log", {"text": f"[{datetime.datetime.now().isoformat(timespec='milliseconds')}][{session_id[:8]}] [SYSTEM_ERROR] Invalid rename request.", "log_source": "SYSTEM_ERROR"})
         return
-
     logger.info(f"[{session_id}] Received request to rename task {task_id_to_rename} to '{new_name}'.")
     renamed_in_db = await db_rename_task_func(task_id_to_rename, new_name)
-
     if renamed_in_db:
         logger.info(f"[{session_id}] Successfully renamed task {task_id_to_rename} in database.")
         await send_ws_message_func("monitor_log", {"text": f"[{datetime.datetime.now().isoformat(timespec='milliseconds')}][{session_id[:8]}] [SYSTEM_EVENT] Task {task_id_to_rename} renamed to '{new_name}' in DB.", "log_source": "SYSTEM_RENAME_SUCCESS"})
     else:
         logger.error(f"[{session_id}] Failed to rename task {task_id_to_rename} in database.")
         await send_ws_message_func("monitor_log", {"text": f"[{datetime.datetime.now().isoformat(timespec='milliseconds')}][{session_id[:8]}] [SYSTEM_ERROR] Failed to rename task {task_id_to_rename} in DB.", "log_source": "DB_ERROR"})
-
