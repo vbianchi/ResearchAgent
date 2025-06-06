@@ -27,13 +27,12 @@ graph TD;
 	executor --> step_evaluator;
 	increment_retry_count --> controller;
 	intent_classifier -.-> direct_qa;
-	intent_classifier -.-> overall_evaluator;
 	intent_classifier -.-> planner;
-	planner -.-> controller;
-	planner -.-> overall_evaluator;
-	step_evaluator -. &nbsp;next_step&nbsp; .-> advance_to_next_step;
-	step_evaluator -. &nbsp;retry_step&nbsp; .-> increment_retry_count;
-	step_evaluator -. &nbsp;evaluate_overall_plan&nbsp; .-> overall_evaluator;
+	planner -.->|&nbsp;success&nbsp;| controller;
+	planner -.->|&nbsp;failure&nbsp;| overall_evaluator;
+	step_evaluator -.->|&nbsp;next_step&nbsp;| advance_to_next_step;
+	step_evaluator -.->|&nbsp;retry_step&nbsp;| increment_retry_count;
+	step_evaluator -.->|&nbsp;evaluate_overall_plan&nbsp;| overall_evaluator;
 	overall_evaluator --> __end__;
 	classDef default fill:#f2f0ff,line-height:1.2
 	classDef first fill-opacity:0
