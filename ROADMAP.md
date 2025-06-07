@@ -1,3 +1,51 @@
+# ResearchAgent: Project Roadmap (Post-Reset)
+
+This document outlines the planned development path for the ResearchAgent project, starting from its new, stable baseline.
+
+## Guiding Principles for Development
+
+-   **Stability First:** Each incremental feature must be fully functional and testable before moving on.
+-   **Clarity and Simplicity:** Start with the simplest implementation and add complexity deliberately and only when necessary.
+-   **User-in-the-Loop (UITL/HITL):** Maintain and enhance key points for user interaction and confirmation.
+-   **Modularity & Maintainability:** Keep logic and configuration separate and well-defined.
+
+### **Phase 1: Stable Core (v2.7 - CURRENT)**
+
+-   **Status:** **COMPLETE**
+-   **Description:** The project has been reset to a stable foundation. The backend now runs a standard LangChain `ReAct` agent.
+-   **Core Functionality:**
+    -   The agent can hold a conversation.
+    -   The agent can autonomously choose and use tools from a predefined, dynamically loaded suite (web search, file I/O, etc.).
+    -   The agent's internal monologue (thoughts, actions, tool observations) is streamed to the UI monitor in real-time.
+    -   The UI is fully functional for task management, chat, and artifact viewing.
+
+### **Phase 2: Re-introducing Advanced Control (Future)**
+
+The goal of this phase is to gradually re-implement the control and planning capabilities that the previous LangGraph attempt aimed for, but in a step-by-step, verifiable manner.
+
+**Step 1: Intent Classification**
+
+-   **Task:** Re-introduce an `intent_classifier` as the first step in processing a user's query.
+-   **Goal:** Create a conditional path. Simple questions (`DIRECT_QA`) will be answered directly by the LLM, while complex requests will be passed to the `ReAct` agent. This avoids invoking the full agent for simple tasks.
+-   **Verification:** Confirm that simple questions are answered quickly without tool-use thoughts, while complex queries correctly trigger the full ReAct agent loop.
+**Step 2: Explicit Planning & Confirmation**
+
+-   **Task:** For complex intents, introduce a `planner` that generates a multi-step plan _before_ execution begins.
+-   **Goal:** Present this plan to the user in the UI for confirmation or cancellation. The `ReAct` agent will then be tasked with executing this confirmed plan, one step at a time.
+-   **Verification:** Confirm that a plan is generated and displayed correctly in the UI, and that the agent's execution follows the approved steps.
+**Step 3: Advanced Execution and Evaluation**
+
+-   **Task:** Explore replacing the single `ReAct` agent with more specialized components for executing and evaluating each step of the plan (revisiting the Controller/Executor/StepEvaluator pattern from the parked code).
+-   **Goal:** Achieve a more robust and granular execution loop where the system can evaluate the success of each step and potentially retry or flag failures.
+-   **Verification:** Test multi-step plans that involve potential failures to see if the system can handle them gracefully.
+
+### **Phase 3: Advanced Features (Long-Term)**
+
+-   **Task:** Implement a secure `PythonSandboxTool` for safer code execution.
+-   **Task:** Enhance the UI for more detailed plan interaction (e.g., step-by-step approval, plan modification).
+-   **Task:** Explore data visualization tools and other advanced capabilities.
+
+
 # LAST UPDATE
 # ResearchAgent: Project Roadmap
 

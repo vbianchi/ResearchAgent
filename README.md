@@ -1,3 +1,62 @@
+# ResearchAgent: AI Assistant for Research Workflows (v2.7 - Reset to Core)
+
+This project provides a functional user interface and backend for an AI agent system designed to assist with research tasks. It features a three-panel layout (Tasks, Chat, Monitor/Artifact Viewer) and connects via WebSockets to a Python backend.
+
+## Current State: Reset to a Stable Core
+
+**CURRENT STATUS: FUNCTIONAL (Simplified ReAct Agent)**
+
+Following a period of instability caused by an attempted migration to a complex graph-based architecture, this project has been strategically reset to a simpler, more robust foundation.
+
+The backend now runs a standard **LangChain `ReAct` (Reasoning and Acting) agent**. This agent is capable of conversational interaction and can use a suite of dynamically loaded tools to perform tasks like web searches, file I/O, and code execution. All interactions, including the agent's internal "thoughts" and tool usage, are streamed to the UI in real-time.
+
+This reset provides a stable and understandable baseline from which we will gradually re-introduce more advanced features in a controlled, incremental manner.
+
+## Tech Stack
+
+-   **Frontend:** HTML5, CSS3, Vanilla JavaScript (ES6+) (Modularized)
+-   **Backend:** Python 3.12, **LangChain**, `aiohttp`, `websockets`
+-   **Containerization:** Docker, Docker Compose
+
+## Key Capabilities (Current)
+
+-   **UI & User Interaction:**
+    -   Task Management with persistent storage (SQLite).
+    -   Real-time chat interface with Markdown rendering.
+    -   Monitor Panel for viewing the agent's live thought process and tool outputs.
+    -   Artifact Viewer for generated text, image, and PDF files.
+    -   File upload capability to a dedicated workspace for each task.
+-   **Backend Architecture (ReAct Core):**
+    -   Modular Python backend with event-driven message handling.
+    -   A core `ReAct` agent that can reason and choose from available tools.
+    -   Task-specific, isolated workspaces on the file system.
+-   **Tool Suite (`backend/tools/` & `tool_config.json`):**
+    -   Dynamically loaded tools including web search (Tavily), web page reader, file I/O, PubMed search, and a Python REPL.
+
+## Project Structure (Simplified)
+
+```
+ResearchAgent/
+├── .env
+├── backend/
+│   ├── agent.py         # <<< NEW CORE: Creates the ReAct agent executor.
+│   ├── callbacks.py     # Handles streaming events to the UI.
+│   ├── config.py        # Application settings.
+│   ├── db_utils.py      # SQLite utilities for task persistence.
+│   ├── llm_setup.py     # Centralized LLM instantiation.
+│   ├── server.py        # Main WebSocket and file server.
+│   ├── tool_loader.py   # Loads tools from the config file.
+│   ├── tool_config.json # Defines the available tools.
+│   └── tools/           # Directory containing all tool implementations.
+├── css/
+│   └── style.css
+├── js/
+│   └── ... (frontend files)
+├── langgraph_pre_reset/ # <<< PARKED: The previous complex graph implementation.
+├── README.md            # This project overview.
+└── ROADMAP.md           # The new, phased development plan.
+
+
 # LAST UPDATE
 # ResearchAgent: AI Assistant for Research Workflows (v2.6.0 In Progress)
 
