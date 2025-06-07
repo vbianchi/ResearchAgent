@@ -12,10 +12,8 @@ from .task_handlers import (
     process_rename_task
 )
 from .agent_flow_handlers import (
-    process_user_message,
-    process_execute_confirmed_plan,
-    _update_plan_file_step_status, # Helper, might not be needed for direct export if only used internally
-    process_cancel_plan_proposal   # ADDED: Ensure this is imported
+    process_user_message
+    # Obsolete plan-related handlers have been removed from this file.
 )
 from .config_handlers import (
     process_set_llm,
@@ -31,11 +29,18 @@ from .operational_handlers import (
 
 # Define __all__ to specify what gets imported with "from . import *"
 # This makes the public API of this sub-package explicit.
+# We have removed the obsolete plan-related handlers.
 __all__ = [
+    # task_handlers
     "process_context_switch", "process_new_task", "process_delete_task", "process_rename_task",
-    "process_user_message", "process_execute_confirmed_plan", "_update_plan_file_step_status",
-    "process_cancel_plan_proposal", # ADDED: Ensure this is exported
+    
+    # agent_flow_handlers (now simplified to just the user message entry point)
+    "process_user_message",
+    
+    # config_handlers
     "process_set_llm", "process_get_available_models", "process_set_session_role_llm",
+    
+    # operational_handlers
     "process_cancel_agent", "process_get_artifacts_for_task", "process_run_command", "process_action_command"
 ]
 
