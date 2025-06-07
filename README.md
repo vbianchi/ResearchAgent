@@ -1,3 +1,58 @@
+# LAST UPDATE
+# ResearchAgent: AI Assistant for Research Workflows (v2.6.0 In Progress)
+
+This project provides a functional user interface and backend for an AI agent system designed to assist with research tasks. It features a three-panel layout (Tasks, Chat, Monitor/Artifact Viewer) and connects via WebSockets to a Python backend.
+
+## Core Architecture & Workflow (LangGraph)
+
+The agent's logic is structured as a stateful graph using **LangGraph**. This architecture is designed for clear and efficient routing of user requests, robust state management, and controllable, iterative execution of complex tasks.
+
+_(This diagram represents the target architecture and will be updated as the graph is rebuilt)_
+
+## Current State & Next Steps (Project Reset)
+
+**CURRENT STATUS: NON-FUNCTIONAL - UNDERGOING REIMPLEMENTATION**
+
+Recent attempts to implement the full LangGraph-based PCEE (Plan-Code-Execute-Evaluate) workflow resulted in a series of cascading integration errors (`KeyError`, `NameError`, `AttributeError`), leading to an unstable and non-functional state.
+
+**The project is now undergoing a strategic reset.**
+
+We are stripping the agent's logic back to a minimal baseline and will be re-implementing the core components in a phased, incremental approach. Each new piece of functionality will be thoroughly tested and verified before proceeding to the next.
+
+### Immediate Next Steps (New Phased Approach)
+
+1.  **Establish a Minimal Baseline:** Create a minimal LangGraph with a single entry and end point to verify the core plumbing.
+2.  **Implement `direct_qa` Path:** Add the simplest agent capability—answering a question without tools—and ensure it works end-to-end.
+3.  **Incrementally Build PCEE Loop:** Add and verify each node of the PCEE workflow (`planner`, `controller`, `executor`, `step_evaluator`) one at a time.
+
+This methodical process will ensure we build a robust and reliable agent on the LangGraph foundation.
+
+## Tech Stack
+
+-   **Frontend:** HTML5, CSS3, Vanilla JavaScript (ES6+) (Modularized)
+-   **Backend:** Python 3.12, **LangGraph**, LangChain, `aiohttp`, `websockets`
+-   **Containerization:** Docker, Docker Compose
+
+## Project Structure
+
+```
+ResearchAgent/
+├── .env
+├── backend/
+│ ├── langgraph_agent.py # Core LangGraph agent definition (UNDER REVISION)
+│ ├── prompts.py         # Centralized system prompts for all LLM components
+│ ├── pydantic_models.py # Centralized Pydantic data models
+│ ├── ... (other backend files)
+├── css/
+│ └── style.css
+├── js/
+│ └── ... (frontend files)
+├── README.md # This project overview
+├── ROADMAP.md # The new, phased development plan
+└── BRAINSTORM.md # Design decisions and project log
+```
+
+# PREVIOUS UPDATE
 # ResearchAgent: AI Assistant for Research Workflows (v2.6.0 In Progress)
 
 This project provides a functional user interface and backend for an AI agent system designed to assist with research tasks, particularly in fields like bioinformatics and epidemiology. It features a three-panel layout (Tasks, Chat, Monitor/Artifact Viewer) and connects via WebSockets to a Python backend. The core agent architecture is built on **LangGraph** for enhanced control, statefulness, and capabilities.

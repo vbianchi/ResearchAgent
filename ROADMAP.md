@@ -1,3 +1,63 @@
+# LAST UPDATE
+# ResearchAgent: Project Roadmap
+
+This document outlines the planned development path for the ResearchAgent project.
+
+## Guiding Principles for Development
+
+-   **Stability First:** Each incremental feature must be stable and testable before moving on.
+-   **Clarity and Simplicity:** Start with the simplest implementation and add complexity deliberately.
+-   **User-in-the-Loop (UITL/HITL):** Maintain key points for user interaction and confirmation.
+-   **Modularity & Maintainability:** Keep logic and configuration separate and well-defined.
+
+### Phase 1: Core UI & Legacy Agent (v2.5)
+
+_This phase is complete._
+
+### Phase 2: LangGraph Migration (v2.6 - Original Plan)
+
+-   **Status:** **ABORTED**
+-   **Outcome:** The "big bang" integration of the full PCEE workflow led to cascading errors and an unstable state. The decision has been made to restart this phase with a more granular, incremental approach.
+
+### **Phase 2 (Restart): Foundational PCEE Implementation**
+
+The primary goal of this phase is to methodically build and verify each component of the PCEE (Plan-Code-Execute-Evaluate) agent on the LangGraph foundation, ensuring stability at each step.
+
+**Step 1: Bare-Bones Graph & `direct_qa` Path**
+
+-   \[ \] **Task:** Strip `langgraph_agent.py` to its absolute minimum.
+-   \[ \] **Task:** Create a graph with only a `direct_qa` node and an `overall_evaluator` node.
+-   \[ \] **Verification:** Confirm that simple, no-tool questions are answered correctly and streamed to the UI.
+**Step 2: Add the `Planner` Node**
+
+-   \[ \] **Task:** Add the `planner` node to the graph.
+-   \[ \] **Task:** Implement a conditional edge from the entry point to route to either `planner` or `direct_qa`.
+-   \[ \] **Task:** The `planner`'s output (the plan) will be sent to the `overall_evaluator` node for display ONLY. No execution will occur.
+-   \[ \] **Verification:** Confirm that complex queries generate a plan and that this plan is correctly displayed in the UI for review.
+**Step 3: Add the `Controller` Node**
+
+-   \[ \] **Task:** Add the `controller` node after the `planner`.
+-   \[ \] **Task:** The `controller` will analyze the first step of the plan and its output (tool name and input) will be sent to the `overall_evaluator` for display.
+-   \[ \] **Verification:** Confirm that the controller correctly interprets a plan step and selects a tool.
+**Step 4: Add the `Executor` Node (Tool Path)**
+
+-   \[ \] **Task:** Add the `executor` node after the `controller`.
+-   \[ \] **Task:** The `executor` will execute a single tool call based on the controller's output.
+-   \[ \] **Verification:** Test with single-step plans that use a tool (e.g., `write_file`). Confirm the tool executes successfully.
+**Step 5: Add the `StepEvaluator` and Full Loop**
+
+-   \[ \] **Task:** Add the `step_evaluator` node and the retry/next-step conditional logic.
+-   \[ \] **Verification:** Test a full, multi-step plan. Verify that the agent can proceed from one step to the next and that the final output is correctly synthesized by the `overall_evaluator`.
+
+### Phase 3: Advanced Features (Post-PCEE Stability)
+
+-   **Task:** Re-implement robust task interruption and cancellation.
+-   **Task:** Enhance UI for plan interaction (e.g., step-by-step approval).
+-   **Task:** Implement the `PythonSandboxTool`
+
+
+
+# PREVIOUS UPDATE
 ResearchAgent: Project Roadmap (v2.6.0 In Progress)
 ===================================================
 
