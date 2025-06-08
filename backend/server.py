@@ -1,5 +1,5 @@
 # backend/server.py
-print("--- EXECUTING LATEST server.py - V10 ---")
+print("--- EXECUTING LATEST server.py - V11 ---")
 import asyncio
 import websockets
 import json
@@ -21,8 +21,10 @@ import aiohttp_cors
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain.memory import ConversationBufferWindowMemory
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
 
-# --- Project Imports (Simplified) ---
+# --- Project Imports ---
 from backend.config import settings
 from backend.agent import create_agent_executor
 from backend.tools import get_dynamic_tools, get_task_workspace_path, BASE_WORKSPACE_ROOT, TEXT_EXTENSIONS
@@ -32,6 +34,8 @@ from backend.db_utils import (
     delete_task_and_messages, rename_task_in_db
 )
 from backend.llm_setup import get_llm
+from backend.intent_classifier import classify_intent
+from backend.prompts import DIRECT_QA_SYSTEM_PROMPT
 
 # --- File Server & Logging Setup ---
 logging.basicConfig(
@@ -48,7 +52,7 @@ FILE_SERVER_LISTEN_HOST = "0.0.0.0"
 FILE_SERVER_CLIENT_HOST = settings.file_server_hostname
 FILE_SERVER_PORT = 8766
 
-# --- Helper functions for file server and artifacts (Unchanged) ---
+# --- Helper functions for file server and artifacts ---
 async def handle_workspace_file(request: web.Request) -> web.Response:
     task_id = request.match_info.get('task_id')
     filename = request.match_info.get('filename')
@@ -123,9 +127,33 @@ async def setup_file_server():
     site = web.TCPSite(runner, FILE_SERVER_LISTEN_HOST, FILE_SERVER_PORT)
     return site, runner
 
-# --- Simplified Agent Runner (No longer needs its own finally block) ---
+# --- Agent Runners ---
+
+async def run_direct_qa(user_input: str, session_id: str):
+    """Handles simple, direct questions without using the ReAct agent."""
+    session = session_data[session_id]
+    send_ws_message = connected_clients[session_id]['send_ws_message']
+    
+    await send_ws_message("agent_thinking_update", {"status": "Answering directly..."})
+    
+    provider, model_name = session["selected_llm_id"].split("::", 1)
+    llm = get_llm(settings, provider, model_name, callbacks=[session["callback_handler"]], requested_for_role="DirectQA")
+    
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", DIRECT_QA_SYSTEM_PROMPT),
+        ("human", "{question}")
+    ])
+    
+    chain = prompt | llm | StrOutputParser()
+    
+    final_answer = await chain.ainvoke({"question": user_input})
+    
+    await send_ws_message("agent_message", final_answer)
+    await add_message(session["current_task_id"], session_id, "agent_message", final_answer)
+    logger.info(f"[{session_id}] Direct QA finished.")
+
 async def run_react_agent(user_input: str, session_id: str):
-    """Creates and runs the ReAct agent. Exceptions are caught by the caller."""
+    """Creates and runs the ReAct agent for complex tasks requiring tools."""
     session = session_data[session_id]
     send_ws_message = connected_clients[session_id]['send_ws_message']
     
@@ -149,9 +177,10 @@ async def run_react_agent(user_input: str, session_id: str):
         config=RunnableConfig(callbacks=[session["callback_handler"]])
     )
     
-    logger.info(f"[{session_id}] Agent execution finished. Final answer was streamed from callback.")
+    logger.info(f"[{session_id}] ReAct Agent execution finished.")
 
-# --- Core WebSocket Handler (Now manages the agent task lifecycle) ---
+# --- Core WebSocket Handler ---
+
 async def handler(websocket: websockets.WebSocketServerProtocol):
     session_id = str(uuid.uuid4())
     logger.info(f"[{session_id}] New client connection from {websocket.remote_address}.")
@@ -201,10 +230,20 @@ async def handler(websocket: websockets.WebSocketServerProtocol):
                     current_session['cancellation_requested'] = False
 
                     # <<< FIX: Robust lifecycle management >>>
-                    agent_task = asyncio.create_task(run_react_agent(user_input, session_id))
-                    connected_clients[session_id]["agent_task"] = agent_task
+                    agent_logic_task = None
                     try:
-                        await agent_task
+                        classification = await classify_intent(user_input)
+                        intent = classification.get("intent")
+                        logger.info(f"[{session_id}] Query classified with intent: {intent}")
+
+                        if intent == "DIRECT_QA":
+                            agent_logic_task = asyncio.create_task(run_direct_qa(user_input, session_id))
+                        else: # Default to AGENT_ACTION
+                            agent_logic_task = asyncio.create_task(run_react_agent(user_input, session_id))
+                        
+                        connected_clients[session_id]["agent_task"] = agent_logic_task
+                        await agent_logic_task
+
                     except AgentCancelledException:
                         logger.warning(f"[{session_id}] Agent task caught AgentCancelledException in handler.")
                         await send_ws_message("status_message", {"text": "Operation cancelled."})
