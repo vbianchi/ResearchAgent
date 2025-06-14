@@ -99,3 +99,66 @@ You will need two separate terminals to run the backend and frontend servers.
 1.  **Install Dependencies:** In your second terminal, run `npm install`. This is crucial to install all dependencies, including the Tailwind CSS typography plugin.
 2.  **Run the Frontend:** Run `npm run dev`.
 3.  **Access the Application:** Open your browser and navigate to the local URL provided by Vite (usually `http://localhost:5173`).
+
+
+# ROADMAP
+
+This document outlines the phased development plan for the ResearchAgent project.
+
+### ✔️ Phase 0-7: Core Engine & Stateful UI
+
+-   \[x\] **Core Backend & Frontend:** Foundational PCEE architecture and UI are stable.
+-   \[x\] **Stateful Task Management:** The application is centered around persistent tasks with independent workspaces and histories.
+
+### 🚀 **UP NEXT:** Phase 8: The "Three-Track Brain" & HITL Refactor
+
+This is a major architectural overhaul to improve the agent's efficiency, robustness, and user interactivity.
+
+-   \[ \] **Implement the Three-Track Router:** Rewrite the `router_node` to intelligently sort user requests into `DIRECT_QA`, `SIMPLE_TOOL_USE`, or `COMPLEX_PROJECT` tracks.
+-   \[ \] **Build the "Handyman" Path:** Create the new `handyman_node` to handle single-step tool commands, bypassing the complex planning loop.
+-   \[ \] **Unify the Output:** Overhaul the `editor_node` and its prompt to serve as the single, consistent voice of the agent for all three tracks.
+-   \[ \] **Implement Conversational HITL:** Build the plan approval loop, allowing the user to conversationally refine the `Chief_Architect`'s plans before execution.
+
+### Phase 9: Advanced Context & Environment
+
+-   \[ \] **Full Conversational History:** Feed the complete chat history back into the prompts to give the agent true multi-turn contextual memory.
+-   \[ \] **Python Virtual Environments:** Implement full dependency sandboxing with per-task `.venv` directories.
+
+### Phase 10: Production Readiness
+
+-   \[ \] **Database Integration:** Replace browser `localStorage` with a robust database backend (e.g., SQLite) for persistent, server-side state.
+-   \[ \] **Enhanced File Viewer:** Upgrade the workspace file viewer to intelligently render various file types (Markdown, images, etc.).
+
+# BRAINSTORM
+
+This document is a living collection of ideas, architectural concepts, and potential future features for the ResearchAgent project.
+
+## 1\. The "Company Model" Architecture
+
+Our agent operates like a small, efficient company with specialized roles. This separation of concerns enables complex, resilient behavior.
+
+-   **The Router:** The dispatcher who triages all incoming requests.
+-   **The Handyman:** A specialist for quick, single-step tool-based tasks.
+-   **The Chief Architect:** The strategist who designs high-level project blueprints.
+-   **The Site Foreman:** The project manager who oversees the execution and correction of individual plan steps.
+-   **The Worker:** The hands-on specialist who executes precise tool commands.
+-   **The Project Supervisor:** The quality assurance inspector who validates outcomes.
+-   **The Editor:** The unified communications director who formats and delivers all final reports and answers to the user.
+
+## 2\. The "Three-Track Brain" Design Philosophy
+
+To avoid using a "sledgehammer for every nail," the agent routes tasks down one of three paths based on its complexity.
+
+-   **Track 1: Direct Q&A:** For simple questions. The Router sends the task directly to the Editor, which functions as a standard chatbot.
+-   **Track 2: Simple Tool Use:** For single commands (e.g., "create a file"). The Router sends the task to the Handyman, who formulates a single-step plan. This is executed by the Worker and summarized by the Editor.
+-   **Track 3: Complex Projects:** For multi-step tasks. The Router engages the full "Company," starting with the Chief Architect. This track utilizes our full planning, execution, self-correction, and human-in-the-loop capabilities.
+
+## 3\. Conversational Human-in-the-Loop (HITL)
+
+The user is a collaborator, not just an operator. The HITL cycle for complex projects ensures the user has ultimate authority over the agent's strategy.
+
+-   **The Dialogue Loop:**
+    1.  The `Chief_Architect` proposes a plan.
+    2.  The system **pauses** and presents the plan to the user.
+    3.  The user can either **approve** the plan to begin execution or provide **natural language feedback** for modifications (e.g., "Add a step to zip the files at the end").
+    4.  If modifications are requested, the feedback is sent back to the `Chief_Architect`, who generates a new, improved plan.
