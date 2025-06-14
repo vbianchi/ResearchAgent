@@ -15,15 +15,15 @@ This document outlines the phased development plan for the ResearchAgent project
 -   \[x\] **Task Management UI:** Implemented a fully functional UI for creating, selecting, renaming, and deleting tasks.
 -   \[x\] **Advanced UI Rendering:** Refactored the frontend into a component-based architecture. Implemented a sophisticated and unified UI for displaying the full conversation, including the user's prompt and the distinct contributions of the Architect, Foreman, and Editor agents, complete with real-time step execution status.
 
-### Phase 8: Conversational Memory & Contextual Awareness \[UP NEXT\]
+### Phase 8: Conversational Memory & Contextual Awareness \[IN PROGRESS\]
 
--   \[ \] **Full Conversational History:** The complete chat history for a given task will be fed back into the agent's prompts. This is the final step to give the agent true contextual memory, allowing for iterative work and follow-up commands (e.g., "now refactor the script you just wrote").
--   \[ \] **Smarter Tool Usage:** The agent will learn to use the output of previous steps as input for subsequent steps without explicit user instruction (e.g., using a search result to inform a file-writing action).
+-   \[ \] **Implement Data Piping \[UP NEXT\]:** The agent will be enhanced to pipe the output of a previous step (e.g., a search result) as the input for a subsequent step. This will be achieved by the `Site_Foreman` resolving placeholders like `{step_1_output}` in tool inputs. This is the first major step toward true contextual awareness.
+-   \[ \] **Full Conversational History:** Once data piping is complete, the full chat history for a given task will be fed back into the agent's prompts to allow for iterative work and follow-up commands (e.g., "now refactor the script you just wrote").
 -   \[ \] **Basic User Abstraction:** Introduce a concept of a `user_id` to associate tasks with a specific user, laying the groundwork for future multi-user support.
 
 ### Phase 9: Advanced Self-Correction & Environment Management
 
--   \[ \] **Self-Correction Sub-Loop:** Implement the logic for the agent to attempt corrective actions when a step fails. This will involve a new `Correction_Planner` node that analyzes the Supervisor's feedback and formulates a fix.
+-   \[x\] **Self-Correction Sub-Loop:** Implemented the foundational logic for the agent to attempt corrective actions. When a step fails, the graph now routes to a `Correction_Planner` node that analyzes the failure and proposes a revised step. The agent will retry a step up to a configured limit.
 -   \[ \] **Smarter Evaluator:** Enhance the `Project_Supervisor` with more nuanced analysis to provide more detailed and actionable feedback for the correction loop.
 -   \[ \] **Python Virtual Environments:** Implement full dependency sandboxing with per-task `.venv` directories to isolate Python tool executions.
 
