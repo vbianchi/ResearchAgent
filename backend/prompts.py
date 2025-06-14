@@ -1,24 +1,20 @@
 # -----------------------------------------------------------------------------
-# ResearchAgent Prompts (Phase 9: Intelligent Foreman & Self-Correction)
+# ResearchAgent Prompts (Phase 9: Full Escalation Hierarchy)
 #
-# This file contains the prompts for the ResearchAgent, updated to reflect
-# the new, more sophisticated agent architecture.
+# This file contains the prompts for our most advanced agent architecture.
 #
-# 1. New `site_foreman_prompt_template`: A powerful, multi-modal prompt that
-#    guides the Site Foreman agent. It has two modes:
-#    a) **Refinement Mode:** Takes a high-level plan step and refines it into a
-#       perfect, executable tool call, including piping data from history.
-#    b) **Correction Mode:** When given failure feedback, it analyzes the error
-#       and generates a new, single-step corrective tool call.
-# 2. Removed `correction_planner_prompt_template`: This logic is now fully
-#    integrated into the Site Foreman's role.
-# 3. Renamed `controller_prompt_template` to `site_foreman_prompt_template` for
-#    clarity and consistency with our "Company Model" architecture.
+# 1. Enhanced `structured_planner_prompt_template`: The Architect's prompt
+#    now includes a dynamic `{replan_feedback}` section. When a task has
+#    failed repeatedly and requires re-planning, this section will be populated
+#    with the full history of failures, instructing the Architect to create a
+#    completely new plan to overcome the obstacle.
+# 2. The `site_foreman_prompt_template` remains the same, as its role as a
+#    tactical corrector is already well-defined.
 # -----------------------------------------------------------------------------
 
 from langchain_core.prompts import PromptTemplate
 
-# 1. Structured Planner Prompt
+# 1. Structured Planner Prompt (with Re-planning instructions)
 structured_planner_prompt_template = PromptTemplate.from_template(
     """
 You are an expert, high-level architect. Your job is to create a strategic,
@@ -27,15 +23,14 @@ step-by-step execution plan in JSON format to fulfill the user's request.
 **User Request:**
 {input}
 
+{replan_feedback}
+
 **Available Tools:**
 {tools}
 
 **Instructions:**
-- You do not need to be perfect with tool syntax. The Site Foreman who executes your plan is intelligent and will correct your work.
-- Focus on the high-level logic and the sequence of operations.
+- Focus on the high-level logic and the sequence of operations. The Site Foreman who executes your plan is intelligent and will correct minor syntax issues.
 - You can assume that the output of a previous step is available for subsequent steps. The Foreman will handle the data piping.
-- Decompose the request into a sequence of logical steps.
-- For each step, specify "step_id", "instruction", "tool_name", and a best-effort "tool_input".
 - Your final output must be a single, valid JSON object containing a "plan" key.
 - Do not add any conversational fluff or explanation. Your output must be ONLY the JSON object.
 ---
@@ -48,15 +43,6 @@ step-by-step execution plan in JSON format to fulfill the user's request.
       "instruction": "Search the web to find information about the LangGraph library.",
       "tool_name": "web_search",
       "tool_input": {{"query": "LangGraph library"}}
-    }},
-    {{
-      "step_id": 2,
-      "instruction": "Based on the search results, write a summary to a file named 'langgraph_summary.md'.",
-      "tool_name": "write_file",
-      "tool_input": {{
-        "file": "langgraph_summary.md",
-        "content": "Use the output from the previous web search here."
-      }}
     }}
   ]
 }}
@@ -64,14 +50,20 @@ step-by-step execution plan in JSON format to fulfill the user's request.
 ---
 **Begin!**
 
-**User Request:**
-{input}
-
 **Your Output (must be a single JSON object):**
 """
 )
 
-# 2. Site Foreman Prompt (NEW: Multi-Modal and Intelligent)
+# This is the dynamic part for re-planning after a major failure.
+REPLAN_FEEDBACK_TEMPLATE = """
+**CRITICAL: Your previous plan failed completely, even after multiple correction attempts. You MUST create a new, different plan to achieve the user's goal.**
+
+**Full History of Failures:**
+{history}
+"""
+
+
+# 2. Site Foreman Prompt
 site_foreman_prompt_template = PromptTemplate.from_template(
     """
 You are the Site Foreman, an expert agent responsible for executing a plan.
@@ -127,49 +119,23 @@ FAILURE_FEEDBACK_TEMPLATE = """
 You MUST analyze the failure reason and generate a NEW tool call to fix the problem and achieve the goal of the current step. Do NOT simply repeat the failed action.
 """
 
-# 3. Evaluator Prompt (Enhanced for Criticality)
+# 3. Evaluator Prompt
 evaluator_prompt_template = PromptTemplate.from_template(
     """
 You are an expert evaluator.
-Your job is to assess the outcome of a tool's
-execution and determine if the step was successful.
+Your job is to assess the outcome of a tool's execution and determine if the step was successful.
 **Plan Step:**
 {current_step}
-
 **Controller's Action (the tool call that was just executed):**
 {tool_call}
-
 **Tool's Output:**
 {tool_output}
 
 **Instructions:**
 - **Critically assess** if the `Tool's Output` **fully and completely satisfies** the `Plan Step`'s instruction.
-- **Do not just check for a successful exit code or the presence of output.** You must verify that the *substance* of the output achieves the step's goal.
-For example, if the step was to find a specific fact, does the output actually contain that fact?
-If not, you must declare it a failure.
-- Your output must be a single, valid JSON object containing a "status" key (which can be "success" or "failure") and a "reasoning" key with a brief explanation.
-- Do not add any conversational fluff or explanation. Your output must be ONLY the JSON object.
+- Your output must be a single, valid JSON object with "status" ('success' or 'failure') and "reasoning".
 ---
-**Example Output:**
-```json
-{{
-  "status": "success",
-  "reasoning": "The tool output successfully provided the requested information, which was the capital of France."
-}}
-```
----
-
 **Begin!**
-
-**Plan Step:**
-{current_step}
-
-**Controller's Action:**
-{tool_call}
-
-**Tool's Output:**
-{tool_output}
-
 **Your Output (must be a single JSON object):**
 """
 )
@@ -179,8 +145,8 @@ final_answer_prompt_template = PromptTemplate.from_template(
     """
 You are the final, user-facing voice of the ResearchAgent. Your role is to act as an expert editor.
 You have been given the user's original request and the complete history of a multi-step plan that was executed to fulfill it.
-
-Your task is to synthesize all the information from the history into a single, comprehensive, and well-written final answer for the user.
+Synthesize all information into a single, comprehensive, and well-written final answer for the user in markdown.
+If the process failed, explain what happened based on the history.
 
 **User's Original Request:**
 {input}
@@ -188,16 +154,7 @@ Your task is to synthesize all the information from the history into a single, c
 **Full Execution History:**
 {history}
 
-**Instructions:**
-1.  Carefully review the entire execution history, including the instructions, actions, and observations for each step.
-2.  Identify the key findings and the data gathered throughout the process.
-3.  Synthesize this information into a clear and coherent response that directly answers the user's original request.
-4.  If the process failed or was unable to find a definitive answer, explain what happened based on the history, and provide the most helpful information you could find.
-5.  Format your answer in clean markdown.
-6.  Do not output JSON or any other machine-readable format.
-Your output must be only the final, human-readable text for the user.
 **Begin!**
-
 **Final Answer:**
 """
 )
